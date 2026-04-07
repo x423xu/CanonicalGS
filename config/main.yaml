@@ -1,0 +1,45 @@
+defaults:
+  - _self_
+  - dataset: re10k
+  - model: minimal
+
+mode: inspect_dataset
+seed: 111123
+output_dir: outputs/canonicalgs
+
+wandb:
+  project: canonicalgs
+  entity: xxy
+  mode: online
+  id: null
+  tags: []
+
+dataset:
+  manifest_path: null
+
+objective:
+  lambda_rend: 1.0
+  lambda_conv: 0.2
+  lambda_mono: 0.05
+  lambda_null: 0.001
+  teacher_support_threshold: 0.5
+  teacher_confidence_threshold: 0.5
+  low_confidence_threshold: 0.25
+
+train:
+  bootstrap_steps: 2
+  bootstrap_lr: 0.001
+  log_every: 1
+  overfit_steps: 100
+  overfit_scene_index: 0
+  overfit_train_context_size: 6
+  render_train_target_views: 1
+  render_eval_target_views: 2
+  save_checkpoint: true
+  amp: true
+
+runtime:
+  device: cuda:7
+  conda_env: depthsplat
+  remote_host: malab
+  remote_root: /data0/xxy/code/CanonicalGS

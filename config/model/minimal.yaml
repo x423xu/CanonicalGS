@@ -1,0 +1,26 @@
+name: canonicalgs_mono_multiview
+voxel_size: 0.12
+max_active_voxels: 300000
+feature_dim: 128
+appearance_dim: 32
+gaussians_per_cell: 1
+encoder_downsample: 8
+dpt_output_stride: 4
+dinov2_model_name: dinov2_vits14
+dinov2_pretrained: true
+freeze_dinov2: false
+num_depth_bins: 128
+min_depth: 0.01
+max_depth: 100.0
+min_depth_uncertainty: 0.05
+free_space_ratio: 0.5
+free_space_steps: 8
+free_space_margin_multiplier: 1.5
+surface_weight: 1.0
+free_weight: 0.5
+surface_band_offsets: [-1.5, -0.5, 0.5, 1.5]
+support_threshold: 0.1
+confidence_threshold: 0.05
+gaussian_scale_min: 0.02
+gaussian_scale_max: 1.0
+opacity_gain: 3.0

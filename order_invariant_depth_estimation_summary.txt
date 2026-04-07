@@ -1,0 +1,186 @@
+
+Order-Invariant Depth Estimation Design
+======================================
+
+Goal
+----
+For a reference view r and a source-view set S = {s_1, ..., s_M}, the depth estimator should satisfy:
+
+D(r, S) = D(r, pi(S))
+
+for any permutation pi.
+
+This means the predicted depth should depend on the set of source views, not their order.
+
+
+Core Principle
+--------------
+Design the depth estimator as a set function over source views:
+
+Depth(I_r, {I_s}) = f( I_r, Pool( { g(I_r, I_s) } ) )
+
+where:
+- g: shared pairwise reference-source processing
+- Pool: symmetric aggregation such as mean, variance, or normalized weighted sum
+- f: refinement and depth readout after aggregation
+
+This ensures the source views are treated as an unordered set.
+
+
+1. DINOv2 Feature Extraction
+----------------------------
+Each image is encoded independently with shared weights:
+
+F_i = P( DINOv2(I_i) )
+
+where:
+- DINOv2 is applied independently to each image
+- P is a shared projection / neck module
+
+Requirements:
+- no cross-view mixing before feature extraction
+- no recurrent processing over views
+- no view-index embeddings
+- no source-slot embeddings
+
+Result:
+The feature extraction stage is automatically order-invariant.
+
+
+2. Pairwise Cost-Volume Construction
+------------------------------------
+For each source view s_j, construct an independent pairwise cost volume with respect to the reference view r:
+
+C_j(x, d) = phi( F_r(x), W(F_{s_j}, x, d) )
+
+where:
+- W is the warp / reprojection operator of source features into the reference frustum at candidate depth d
+- phi is a shared matching function
+- x is the reference pixel coordinate
+- d is the candidate depth plane
+
+Requirements:
+- each pairwise cost C_j is built independently
+- the same cost-construction module is reused for all source views
+
+This produces a set of pairwise costs:
+{ C_1, C_2, ..., C_M }
+
+
+3. Symmetric Source-View Aggregation
+------------------------------------
+Aggregate all pairwise costs with a symmetric operator.
+
+Option A: Mean aggregation
+C_bar = (1/M) * sum_j C_j
+
+Option B: Variance aggregation
+mu = (1/M) * sum_j C_j
+C_bar = (1/M) * sum_j (C_j - mu)^2
+
+Option C: Learned symmetric weighted aggregation (recommended)
+Predict a per-source quality score:
+
+q_j = psi(C_j, g_{rj})
+
+where g_{rj} can include geometric metadata such as:
+- baseline
+- relative viewing angle
+- reprojection confidence
+
+Then compute normalized weights:
+
+alpha_j = exp(q_j) / sum_k exp(q_k)
+
+and aggregate:
+
+C_bar = sum_j alpha_j * C_j
+
+Why this remains order-invariant:
+- psi is shared for all source views
+- normalization is over the full source-view set
+- the final weighted sum is commutative
+
+
+4. Refinement Module
+--------------------
+Refinement must be applied only after symmetric aggregation.
+
+Correct design:
+C_tilde = R(C_bar)
+
+Important:
+- R should only see the aggregated cost C_bar
+- R should not see the ordered stack [C_1, ..., C_M]
+- this preserves order invariance
+
+Recommended implementation:
+Use a lightweight 2D U-Net on the aggregated cost volume slices, with depthwise convolution for fast inference.
+
+Suggested 2D U-Net design:
+- depthwise separable convolutions in all encoder and decoder blocks
+- pointwise 1x1 convolutions after depthwise convolutions
+- lightweight skip connections
+- small channel widths
+- shallow network depth for efficiency
+
+Why depthwise conv:
+- much lower FLOPs than full convolution
+- much faster inference on modern hardware
+- preserves spatial context sufficiently for cost refinement
+
+Important note:
+The 2D U-Net is applied after source-view aggregation, so it does not break order invariance.
+
+
+5. Depth Prediction
+-------------------
+From the refined aggregated cost, predict the depth distribution:
+
+P(d | x) = softmax( C_tilde(x, d) )
+
+Then regress depth:
+
+d_hat(x) = sum_d P(d | x) * d
+
+Optionally also predict uncertainty.
+
+
+6. What to Avoid
+----------------
+To preserve strict order invariance, avoid:
+
+- concatenating source views and convolving along the source-view axis
+- recurrent fusion over source views
+- source-view position embeddings
+- source-slot embeddings
+- ordered attention over source views
+- any module that treats source index as meaningful
+
+These operations make the depth prediction depend on source-view order.
+
+
+7. Subset Robustness
+--------------------
+To make the order-invariant depth estimator also robust to variable source subsets:
+
+- train with random source subsets
+- use normalized aggregation instead of raw unnormalized sum
+- share all per-source modules
+- avoid architectures tied to a fixed number of source views
+
+This makes the estimator work naturally with different numbers of input source views.
+
+
+8. Final Architecture Summary
+-----------------------------
+A clean order-invariant depth estimator should follow this pipeline:
+
+1. apply DINOv2 independently to every image
+2. build pairwise reference-source cost volumes independently
+3. aggregate all pairwise costs with a symmetric operator
+4. refine only the aggregated cost with a lightweight 2D U-Net using depthwise convolutions
+5. predict depth from the refined aggregated cost
+
+One-sentence summary:
+Encode each view independently, build pairwise costs independently, fuse them with a symmetric set operator, and refine only after aggregation using a fast depthwise-convolution 2D U-Net.

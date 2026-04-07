@@ -1,0 +1,370 @@
+
+Canonical Feedforward 3DGS Pipeline (Voxel-Canonical, Soft-Gated, PointNet Refiner)
+====================================================================================
+
+Goal
+----
+Build a feedforward 3DGS pipeline where the canonical scene representation lives in a latent voxel volume, while Gaussian splats are only rendering primitives.
+
+The latent voxel layer should preserve:
+1. subset invariance
+2. order invariance
+3. monotonicity
+4. support identification
+
+The Gaussian layer should preserve:
+- rendering quality
+- differentiability
+- efficiency
+
+Core Design Principle
+---------------------
+Do NOT let the model directly predict a free Gaussian soup from images.
+
+Instead use:
+
+images
+-> per-view evidence
+-> commutative voxel accumulation
+-> small PointNet-based refinement
+-> soft-gated Gaussian decoding
+-> rendering
+
+This means:
+- canonicality is enforced at the voxel state layer
+- rendering flexibility is handled at the Gaussian layer
+
+
+1. Inputs
+---------
+Given N input images:
+
+{(I_i, K_i, T_i)} for i = 1...N
+
+where:
+- I_i: image
+- K_i: intrinsic matrix
+- T_i: camera pose
+
+For each image, predict:
+- 2D feature map f_i(u)
+- depth mean mu_i(u)
+- depth uncertainty sigma_i(u)
+- confidence weight w_i(u)
+
+
+2. Per-view Evidence Construction
+---------------------------------
+For each image independently:
+
+(a) Encode image
+    f_i = E_2D(I_i)
+
+(b) Predict depth and uncertainty
+    mu_i, sigma_i, w_i = D(I_i)
+
+(c) Lift each pixel along its ray into voxel evidence
+
+For each pixel ray:
+- voxels before depth receive free-space evidence
+- voxels near depth receive surface evidence
+- geometry and appearance features are written near the surface band
+
+Each view creates a sparse evidence volume E_i(v) with:
+
+- E_i^surf(v): surface evidence
+- E_i^free(v): free-space evidence
+- M_i^geo(v): weighted geometry feature sum
+- W_i^geo(v): geometry feature weight
+- M_i^app(v): weighted appearance feature sum
+- W_i^app(v): appearance feature weight
+
+Important:
+- each view is processed independently
+- no cross-view sequential fusion is used here
+- this helps subset robustness
+
+
+3. Canonical Voxel Accumulation
+-------------------------------
+Aggregate all per-view evidence with commutative operators:
+
+L^surf(v) = sum_i E_i^surf(v)
+L^free(v) = sum_i E_i^free(v)
+
+M^geo(v) = sum_i M_i^geo(v)
+W^geo(v) = sum_i W_i^geo(v)
+
+M^app(v) = sum_i M_i^app(v)
+W^app(v) = sum_i W_i^app(v)
+
+Then compute voxel features:
+
+Z^geo(v) = M^geo(v) / (W^geo(v) + eps)
+Z^app(v) = M^app(v) / (W^app(v) + eps)
+
+Support / free / unknown readout:
+
+p_surf(v) = sigmoid(L^surf(v) - L^free(v))
+p_free(v) = sigmoid(L^free(v) - L^surf(v))
+c(v)      = L^surf(v) + L^free(v)
+p_unk(v)  = exp(-c(v))
+
+Why this is important:
+- order invariance is exact because sums are commutative
+- monotonicity appears because evidence only accumulates
+- support identification is derived from evidence, not freely classified
+- unknown voxels remain unknown if no evidence arrives
+
+
+4. Small PointNet-based Refinement Module
+-----------------------------------------
+Refinement is optional in principle, but we keep a small one for denoising and local consistency.
+
+Placement:
+- after voxel accumulation
+- before Gaussian decoding
+
+Input per active voxel:
+X(v) = [L^surf(v), L^free(v), Z^geo(v), Z^app(v), c(v)]
+
+Use a lightweight PointNet-style module:
+- point-wise MLP
+- local neighborhood aggregation (optional KNN / radius)
+- shallow residual head
+
+Important restriction:
+- refinement is small and conservative
+- it should refine features, not redefine scene ontology
+
+Recommended behavior:
+- do not aggressively rewrite L^surf and L^free
+- mainly refine Z^geo and Z^app
+- optionally predict a small residual on support logits, but only if gated very conservatively
+
+Conservative residual update:
+X'(v) = X(v) + g(v) * DeltaX(v)
+
+where:
+- DeltaX(v) is predicted by the PointNet refiner
+- g(v) is a confidence-controlled gate
+
+Gate rule:
+- low confidence -> larger correction allowed
+- high confidence -> smaller correction allowed
+
+Example:
+g(v) = 1 / (1 + alpha * c(v))
+
+Reason:
+Refinement should correct uncertainty, not rewrite certainty.
+
+
+5. Monotonic Decoder Design
+---------------------------
+The decoder must not break monotonicity.
+
+Use the accumulated statistics as stable readout variables:
+- p_surf(v)
+- c(v)
+- Z^geo(v)
+- Z^app(v)
+
+Decode Gaussian parameters locally from each voxel:
+
+(raw_alpha_v, delta_x_v, Sigma_v, phi_v) = GDec(Z^geo(v), Z^app(v), p_surf(v), c(v))
+
+where:
+- raw_alpha_v: raw opacity
+- delta_x_v: bounded center offset inside voxel
+- Sigma_v: bounded covariance
+- phi_v: appearance / SH parameters
+
+Important monotonicity constraints:
+- decoder is local per voxel
+- center offset is bounded within the voxel
+- covariance is bounded relative to voxel size
+- decoder should not use large global interactions
+
+
+6. Soft Gate for Training (Keeping Option 4 and 5)
+--------------------------------------------------
+We keep the soft gate design using both support and confidence.
+
+Define:
+
+p_v = p_surf(v)
+c_v = c(v)
+
+Soft support-confidence gate:
+g_soft(v) = sigmoid(beta * (p_v - tau)) * (1 - exp(-lambda * c_v))
+
+This combines:
+
+Option 4:
+- confidence-aware gating
+
+Option 5:
+- decode first, gate late
+
+Use late gating on opacity:
+
+alpha_v = g_soft(v) * raw_alpha_v
+
+Meaning:
+- the decoder still predicts Gaussian parameters normally
+- the Gaussian contribution is softly suppressed if support/confidence is weak
+- training remains differentiable
+- early noisy voxels do not dominate rendering
+- as evidence accumulates, the Gaussian smoothly activates
+
+Why late gating is preferred:
+- gating early would kill gradients
+- gating opacity is smooth and stable
+- geometry parameters remain learnable while contribution is controlled
+
+Inference-time hard pruning:
+At test time, keep only voxels with:
+- p_surf(v) > tau_test
+- c(v) > tau_conf
+
+This gives efficiency, while training remains soft.
+
+
+7. Final Gaussian Generation
+----------------------------
+For each active voxel:
+1. read support/confidence/features
+2. decode Gaussian parameters
+3. apply soft opacity gate in training
+4. apply hard pruning in inference
+
+Final Gaussian:
+- center = voxel_center + delta_x_v
+- covariance = Sigma_v
+- opacity = alpha_v
+- appearance = phi_v
+
+Thus:
+- voxel layer is canonical
+- Gaussian layer is a rendering layer
+
+
+8. Training Procedure
+---------------------
+For a training scene with N images:
+
+Step 1:
+Sample two subsets of views:
+- A
+- B
+
+They should partially overlap or one can be nested in the other.
+
+Step 2:
+Forward subset A:
+- per-view evidence
+- voxel accumulation
+- PointNet refinement
+- Gaussian decoding
+- render query views
+
+Obtain:
+- S_A: voxel state
+- G_A: Gaussians
+- Ihat_A: rendered views
+
+Step 3:
+Forward subset B similarly:
+- S_B
+- G_B
+- Ihat_B
+
+Step 4:
+Optimize only two losses:
+
+(a) Rendering loss
+L_rend = image reconstruction loss on rendered query views
+Typical choice:
+- L1
+- SSIM
+- LPIPS
+
+(b) Subset consistency loss
+Apply on overlap high-confidence voxels:
+
+m_AB(v) = 1[c_A(v) > t] * 1[c_B(v) > t]
+
+Support consistency:
+L_subset_supp =
+sum_v m_AB(v) * ( |L_A^surf(v) - L_B^surf(v)| + |L_A^free(v) - L_B^free(v)| )
+
+Geometry consistency:
+L_subset_geo =
+sum_v m_AB(v) * ||Z_A^geo(v) - Z_B^geo(v)||
+
+Optionally use weaker or no appearance consistency.
+
+Total loss:
+L = L_rend + lambda_subset * L_subset
+
+Why this is elegant:
+- order invariance comes from architecture
+- monotonicity comes mostly from cumulative state + conservative refinement
+- support identification comes from evidence construction
+- only rendering and subset agreement need explicit loss
+
+
+9. Inference Procedure
+----------------------
+Given N input images:
+
+1. independently encode each image
+2. build each per-view sparse evidence volume
+3. commutatively accumulate all evidence
+4. run the small PointNet-based refiner
+5. decode Gaussians from voxel states
+6. hard-prune low-support, low-confidence voxels
+7. render novel views
+
+Optional incremental update:
+If a new image arrives:
+- build its evidence volume
+- add it to the voxel state by accumulation
+- refine active voxels locally
+- update affected Gaussians
+
+This preserves the monotonic evidence-accumulation design.
+
+
+10. Why This Pipeline Works
+---------------------------
+Subset invariance:
+- promoted by random subset training
+- enforced by subset consistency loss
+- helped by independent per-view encoding + set-based accumulation
+
+Order invariance:
+- exact by commutative evidence accumulation
+- no recurrent view-order-sensitive fusion
+
+Monotonicity:
+- evidence is cumulative
+- feature moments are cumulative
+- confidence grows with evidence
+- refinement is conservative
+- Gaussian activation increases smoothly with support/confidence
+
+Support identification:
+- derived from free-space and surface evidence
+- not a free classifier head
+
+Rendering quality:
+- handled by Gaussian decoder and splatting renderer
+- soft gate keeps training smooth
+- hard pruning keeps inference efficient
+
+
+11. One-sentence Summary
+------------------------
+The full pipeline is a feedforward set-to-volume-to-Gaussians architecture: each input image is independently converted into uncertainty-aware 3D evidence, all evidence is accumulated into a canonical support-aware voxel state through commutative updates, a small PointNet-based module conservatively refines the accumulated state, and Gaussian splats are locally decoded and softly gated by support and confidence during training, while hard-pruned at inference for efficient rendering.
