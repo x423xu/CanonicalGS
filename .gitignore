@@ -225,3 +225,4 @@ scratch/
 *.ply
 *.mp4
 *.avi
+.vscode/
