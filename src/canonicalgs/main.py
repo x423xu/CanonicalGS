@@ -77,10 +77,10 @@ def main(cfg_dict: DictConfig) -> None:
                     cfg.dataset.split,
                     builder,
                     cfg.dataset.inspect_num_scenes,
-                    cfg.dataset.validation_holdout_stride,
-                    cfg.dataset.validation_holdout_offset,
-                    cfg.dataset.evaluation_holdout_stride,
-                    cfg.dataset.evaluation_holdout_offset,
+                    cfg.dataset.eval_holdout_stride,
+                    cfg.dataset.eval_holdout_offset,
+                    cfg.dataset.eval_holdout_stride,
+                    cfg.dataset.eval_holdout_offset,
                 )
                 print(
                     "[CanonicalGS] "
@@ -103,10 +103,10 @@ def main(cfg_dict: DictConfig) -> None:
                     builder,
                     min(cfg.dataset.inspect_num_scenes, 1),
                     tuple(cfg.dataset.image_shape),
-                    cfg.dataset.validation_holdout_stride,
-                    cfg.dataset.validation_holdout_offset,
-                    cfg.dataset.evaluation_holdout_stride,
-                    cfg.dataset.evaluation_holdout_offset,
+                    cfg.dataset.eval_holdout_stride,
+                    cfg.dataset.eval_holdout_offset,
+                    cfg.dataset.eval_holdout_stride,
+                    cfg.dataset.eval_holdout_offset,
                 )
                 if tensor_episodes:
                     sample_tensors = tensor_episodes[0]
@@ -155,10 +155,10 @@ def main(cfg_dict: DictConfig) -> None:
             builder,
             1,
             tuple(cfg.dataset.image_shape),
-            cfg.dataset.validation_holdout_stride,
-            cfg.dataset.validation_holdout_offset,
-            cfg.dataset.evaluation_holdout_stride,
-            cfg.dataset.evaluation_holdout_offset,
+            cfg.dataset.eval_holdout_stride,
+            cfg.dataset.eval_holdout_offset,
+            cfg.dataset.eval_holdout_stride,
+            cfg.dataset.eval_holdout_offset,
         )
         if not tensor_episodes:
             raise ValueError("no buildable RE10K tensor episodes found")
@@ -198,10 +198,10 @@ def main(cfg_dict: DictConfig) -> None:
             builder,
             1,
             tuple(cfg.dataset.image_shape),
-            cfg.dataset.validation_holdout_stride,
-            cfg.dataset.validation_holdout_offset,
-            cfg.dataset.evaluation_holdout_stride,
-            cfg.dataset.evaluation_holdout_offset,
+            cfg.dataset.eval_holdout_stride,
+            cfg.dataset.eval_holdout_offset,
+            cfg.dataset.eval_holdout_stride,
+            cfg.dataset.eval_holdout_offset,
         )
         if not tensor_episodes:
             raise ValueError("no buildable RE10K tensor episodes found")
@@ -259,10 +259,10 @@ def main(cfg_dict: DictConfig) -> None:
             builder,
             1,
             tuple(cfg.dataset.image_shape),
-            cfg.dataset.validation_holdout_stride,
-            cfg.dataset.validation_holdout_offset,
-            cfg.dataset.evaluation_holdout_stride,
-            cfg.dataset.evaluation_holdout_offset,
+            cfg.dataset.eval_holdout_stride,
+            cfg.dataset.eval_holdout_offset,
+            cfg.dataset.eval_holdout_stride,
+            cfg.dataset.eval_holdout_offset,
         )
         if not tensor_episodes:
             raise ValueError("no buildable RE10K tensor episodes found")
@@ -353,10 +353,10 @@ def main(cfg_dict: DictConfig) -> None:
             builder,
             1,
             tuple(cfg.dataset.image_shape),
-            cfg.dataset.validation_holdout_stride,
-            cfg.dataset.validation_holdout_offset,
-            cfg.dataset.evaluation_holdout_stride,
-            cfg.dataset.evaluation_holdout_offset,
+            cfg.dataset.eval_holdout_stride,
+            cfg.dataset.eval_holdout_offset,
+            cfg.dataset.eval_holdout_stride,
+            cfg.dataset.eval_holdout_offset,
         )
         if not tensor_episodes:
             raise ValueError("no buildable RE10K tensor episodes found")

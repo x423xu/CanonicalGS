@@ -16,8 +16,10 @@ from .render_metrics import compute_render_stats
 
 
 def run_bootstrap_training(cfg: RootConfig) -> None:
+    builder_context_sizes = _stage_builder_context_sizes(cfg)
+    train_context_sizes = _sorted_unique(cfg.dataset.train_context_sizes)
     builder = EpisodeBuilder(
-        context_sizes=tuple(cfg.dataset.context_sizes),
+        context_sizes=tuple(builder_context_sizes),
         target_views=cfg.dataset.target_views,
         min_frames_per_episode=cfg.dataset.min_frames_per_episode,
         subsample_to=cfg.dataset.subsample_to,
@@ -29,10 +31,10 @@ def run_bootstrap_training(cfg: RootConfig) -> None:
         episode_builder=builder,
         image_shape=tuple(cfg.dataset.image_shape),
         max_scenes=cfg.train.bootstrap_steps,
-        validation_holdout_stride=cfg.dataset.validation_holdout_stride,
-        validation_holdout_offset=cfg.dataset.validation_holdout_offset,
-        evaluation_holdout_stride=cfg.dataset.evaluation_holdout_stride,
-        evaluation_holdout_offset=cfg.dataset.evaluation_holdout_offset,
+        validation_holdout_stride=cfg.dataset.eval_holdout_stride,
+        validation_holdout_offset=cfg.dataset.eval_holdout_offset,
+        evaluation_holdout_stride=cfg.dataset.eval_holdout_stride,
+        evaluation_holdout_offset=cfg.dataset.eval_holdout_offset,
     )
     device = resolve_runtime_device(cfg.runtime.device)
     pipeline = CanonicalGsPipeline(cfg.model).to(device)
@@ -47,25 +49,26 @@ def run_bootstrap_training(cfg: RootConfig) -> None:
 
     for step, episode in enumerate(dataset, start=1):
         episode = move_to_device(episode, device)
-        largest_context = max(cfg.dataset.context_sizes)
+        largest_context = max(train_context_sizes)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
-            outputs = {
-                context_size: pipeline(
-                    episode,
-                    context_size,
-                    include_render_payload=(context_size == largest_context),
-                )
-                for context_size in cfg.dataset.context_sizes
-            }
-            losses = loss_computer(outputs)
+            outputs = pipeline.forward_prefixes(
+                episode,
+                context_sizes=train_context_sizes,
+                include_render_payload=True,
+            )
+            losses = loss_computer(
+                outputs,
+                episode=episode,
+                max_render_targets=cfg.train.render_train_target_views,
+            )
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=False):
             render_stats = compute_render_stats(
                 episode=episode,
                 output=outputs[largest_context],
                 max_targets=cfg.train.render_train_target_views,
             )
-            total_loss = losses.total_loss.float() + cfg.objective.lambda_rend * render_stats.mse
+            total_loss = losses.total_loss.float()
         scaler.scale(total_loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -87,6 +90,9 @@ def run_bootstrap_training(cfg: RootConfig) -> None:
             summary[metric_name("train", "gaussians", largest_context)] = outputs[
                 largest_context
             ]["num_gaussians"]
+            summary[metric_name("train", "mean_semantic_consistency", largest_context)] = outputs[
+                largest_context
+            ]["mean_semantic_consistency"]
             print(
                 "[CanonicalGS] "
                 f"train_step={step} "
@@ -104,3 +110,11 @@ def run_bootstrap_training(cfg: RootConfig) -> None:
 
     if run is not None:
         run.finish()
+
+
+def _stage_builder_context_sizes(cfg: RootConfig) -> list[int]:
+    return _sorted_unique(cfg.dataset.train_context_sizes, cfg.dataset.eval_context_sizes)
+
+
+def _sorted_unique(*groups: list[int]) -> list[int]:
+    return sorted({value for group in groups for value in group})

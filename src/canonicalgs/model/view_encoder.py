@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 
 import torch
@@ -16,7 +17,26 @@ class ViewEncoderOutput:
     geometry_features: torch.Tensor
     depth: torch.Tensor
     depth_uncertainty: torch.Tensor
+    appearance_uncertainty: torch.Tensor
+    positional_certainty: torch.Tensor
+    appearance_certainty: torch.Tensor
+    combined_certainty: torch.Tensor
+    depth_confidence: torch.Tensor
     confidence: torch.Tensor
+
+
+@dataclass(slots=True)
+class EncodedViewFeatures:
+    images: torch.Tensor
+    lowres_geometry: torch.Tensor
+    fullres_geometry: torch.Tensor
+
+    def subset(self, count: int) -> "EncodedViewFeatures":
+        return EncodedViewFeatures(
+            images=self.images[:count],
+            lowres_geometry=self.lowres_geometry[:count],
+            fullres_geometry=self.fullres_geometry[:count],
+        )
 
 
 class DepthwiseSeparableBlock(nn.Module):
@@ -57,22 +77,43 @@ class DinoV2Backbone(nn.Module):
         model_name: str,
         pretrained: bool,
         freeze: bool,
+        allow_fallback: bool = False,
     ) -> None:
         super().__init__()
         self.model_name = model_name
         self.pretrained = pretrained
         self.freeze = freeze
         self.patch_size = 14
-        self.backbone = torch.hub.load(
-            "facebookresearch/dinov2",
-            model_name,
-            pretrained=pretrained,
-        )
-        self.embed_dim = int(getattr(self.backbone, "embed_dim", self.backbone.num_features))
-        if "vitl" in model_name:
-            self.intermediate_layer_idx = [4, 11, 17, 23]
-        else:
+        self.backbone: nn.Module
+        self.is_fallback = False
+        try:
+            self.backbone = torch.hub.load(
+                "facebookresearch/dinov2",
+                model_name,
+                pretrained=pretrained,
+            )
+            self.embed_dim = int(getattr(self.backbone, "embed_dim", self.backbone.num_features))
+            if "vitl" in model_name:
+                self.intermediate_layer_idx = [4, 11, 17, 23]
+            else:
+                self.intermediate_layer_idx = [2, 5, 8, 11]
+        except Exception as exc:
+            if not allow_fallback:
+                raise RuntimeError(
+                    "Failed to load the requested DINOv2 backbone. "
+                    "CanonicalGS expects a ViT+DPT feature extractor; "
+                    "set model.allow_dinov2_fallback=true only for explicit non-paper fallback."
+                ) from exc
+            warnings.warn(
+                "Falling back to a lightweight patch backbone because DINOv2 could not be loaded. "
+                "This is a non-paper test path and should not be used for paper-fidelity experiments.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.backbone = _FallbackPatchBackbone(patch_size=self.patch_size)
+            self.embed_dim = self.backbone.embed_dim
             self.intermediate_layer_idx = [2, 5, 8, 11]
+            self.is_fallback = True
 
         if freeze:
             for parameter in self.backbone.parameters():
@@ -99,23 +140,71 @@ class DinoV2Backbone(nn.Module):
         if self.freeze:
             self.backbone.eval()
             with torch.no_grad():
-                outputs = self.backbone.get_intermediate_layers(
-                    images,
-                    self.intermediate_layer_idx,
-                    return_class_token=True,
-                )
+                outputs = self._extract_intermediate_layers(images)
         else:
-            outputs = self.backbone.get_intermediate_layers(
-                images,
-                self.intermediate_layer_idx,
-                return_class_token=True,
-            )
+            outputs = self._extract_intermediate_layers(images)
         return outputs, patch_h, patch_w, (height, width)
+
+    def _extract_intermediate_layers(
+        self,
+        images: torch.Tensor,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        if self.is_fallback:
+            return self.backbone(images, self.intermediate_layer_idx)
+        return self.backbone.get_intermediate_layers(
+            images,
+            self.intermediate_layer_idx,
+            return_class_token=True,
+        )
 
     def _normalize(self, images: torch.Tensor) -> torch.Tensor:
         mean = images.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
         std = images.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
         return (images - mean) / std
+
+
+class _FallbackPatchBlock(nn.Module):
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(8, channels),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
+class _FallbackPatchBackbone(nn.Module):
+    def __init__(self, patch_size: int, embed_dim: int = 384, depth: int = 12) -> None:
+        super().__init__()
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.patch_embed = nn.Conv2d(
+            3,
+            embed_dim,
+            kernel_size=patch_size,
+            stride=patch_size,
+        )
+        self.blocks = nn.ModuleList([_FallbackPatchBlock(embed_dim) for _ in range(depth)])
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        intermediate_layer_idx: list[int],
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        x = self.patch_embed(images)
+        outputs: list[tuple[torch.Tensor, torch.Tensor]] = []
+        target_layers = set(intermediate_layer_idx)
+        for index, block in enumerate(self.blocks):
+            x = block(x)
+            if index in target_layers:
+                tokens = x.flatten(2).transpose(1, 2)
+                cls_token = tokens.mean(dim=1)
+                outputs.append((tokens, cls_token))
+        return outputs
 
 
 class CostVolumeDepthPredictor(nn.Module):
@@ -126,12 +215,16 @@ class CostVolumeDepthPredictor(nn.Module):
         min_depth: float,
         max_depth: float,
         min_depth_uncertainty: float,
+        cost_volume_temperature: float = 0.35,
+        cost_volume_visibility_beta: float = 0.2,
     ) -> None:
         super().__init__()
         self.num_depth_bins = num_depth_bins
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.min_depth_uncertainty = min_depth_uncertainty
+        self.cost_volume_temperature = cost_volume_temperature
+        self.cost_volume_visibility_beta = cost_volume_visibility_beta
 
         self.depth_prior = nn.Conv2d(feature_dim, num_depth_bins, kernel_size=1)
         self.cost_refiner = nn.Sequential(
@@ -204,16 +297,17 @@ class CostVolumeDepthPredictor(nn.Module):
                         (low_h, low_w),
                     )
                     ref_volume = ref_feature.unsqueeze(2).expand(-1, -1, self.num_depth_bins, -1, -1)
-                    pair_cost = 1.0 - F.cosine_similarity(ref_volume, warped, dim=1)
+                    pair_similarity = F.cosine_similarity(ref_volume, warped, dim=1)
+                    pair_cost = 1.0 - pair_similarity
                     pair_cost = pair_cost * visibility + (1.0 - visibility)
                     costs.append(pair_cost)
                     visibilities.append(visibility)
 
                 stacked_costs = torch.cat(costs, dim=0)
                 stacked_visibilities = torch.cat(visibilities, dim=0)
-                aggregated_cost = (
-                    (stacked_costs * stacked_visibilities).sum(dim=0, keepdim=True)
-                    / stacked_visibilities.sum(dim=0, keepdim=True).clamp_min(1.0)
+                aggregated_cost = self._aggregate_source_costs(
+                    stacked_costs,
+                    stacked_visibilities,
                 )
                 visibility_score = stacked_visibilities.mean(dim=(0, 1)).view(1, 1, low_h, low_w)
 
@@ -357,6 +451,28 @@ class CostVolumeDepthPredictor(nn.Module):
         warped = warped * visibility.unsqueeze(1)
         return warped, visibility
 
+    def _aggregate_source_costs(
+        self,
+        stacked_costs: torch.Tensor,
+        stacked_visibilities: torch.Tensor,
+    ) -> torch.Tensor:
+        visibility = stacked_visibilities.clamp(0.0, 1.0)
+        matching_confidence = torch.exp(-stacked_costs)
+        score = (
+            torch.log(matching_confidence.clamp_min(1e-6))
+            / max(self.cost_volume_temperature, 1e-6)
+            + self.cost_volume_visibility_beta * torch.log(visibility.clamp_min(1e-6))
+        )
+        score = torch.where(
+            visibility > 0.0,
+            score,
+            torch.full_like(score, torch.finfo(score.dtype).min),
+        )
+        coefficients = torch.softmax(score, dim=0) * visibility
+        coefficients = coefficients / coefficients.sum(dim=0, keepdim=True).clamp_min(1e-6)
+        aggregated_cost = (stacked_costs * coefficients).sum(dim=0, keepdim=True)
+        return aggregated_cost
+
 
 class SymmetricMultiViewEncoder(nn.Module):
     def __init__(
@@ -367,16 +483,21 @@ class SymmetricMultiViewEncoder(nn.Module):
         max_depth: float = 8.0,
         min_depth_uncertainty: float = 0.05,
         num_depth_bins: int = 32,
+        cost_volume_temperature: float = 0.35,
+        cost_volume_visibility_beta: float = 0.2,
         dpt_output_stride: int = 4,
         dinov2_model_name: str = "dinov2_vits14",
         dinov2_pretrained: bool = True,
         freeze_dinov2: bool = True,
+        allow_dinov2_fallback: bool = False,
+        appearance_uncertainty_bias: float = 0.05,
     ) -> None:
         super().__init__()
         self.backbone = DinoV2Backbone(
             model_name=dinov2_model_name,
             pretrained=dinov2_pretrained,
             freeze=freeze_dinov2,
+            allow_fallback=allow_dinov2_fallback,
         )
         self.dpt_head = DptFeatureHead(
             in_channels=self.backbone.embed_dim,
@@ -393,7 +514,23 @@ class SymmetricMultiViewEncoder(nn.Module):
             min_depth=min_depth,
             max_depth=max_depth,
             min_depth_uncertainty=min_depth_uncertainty,
+            cost_volume_temperature=cost_volume_temperature,
+            cost_volume_visibility_beta=cost_volume_visibility_beta,
         )
+        self.min_depth = min_depth
+        self.appearance_adapter = nn.Sequential(
+            nn.Conv2d(feature_dim, feature_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            DepthwiseSeparableBlock(feature_dim, feature_dim),
+            nn.Conv2d(feature_dim, appearance_dim, kernel_size=1),
+        )
+        self.appearance_uncertainty_head = nn.Sequential(
+            nn.Conv2d(feature_dim + appearance_dim, feature_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            DepthwiseSeparableBlock(feature_dim, feature_dim),
+            nn.Conv2d(feature_dim, 1, kernel_size=1),
+        )
+        self.appearance_uncertainty_bias = appearance_uncertainty_bias
 
     def forward(
         self,
@@ -401,6 +538,10 @@ class SymmetricMultiViewEncoder(nn.Module):
         intrinsics: torch.Tensor,
         extrinsics: torch.Tensor,
     ) -> ViewEncoderOutput:
+        encoded = self.encode_views(images)
+        return self.decode_views(encoded, intrinsics, extrinsics)
+
+    def encode_views(self, images: torch.Tensor) -> EncodedViewFeatures:
         dino_features, patch_h, patch_w, output_size = self.backbone(images)
         lowres_geometry, fullres_geometry = self.dpt_head(
             dino_features,
@@ -408,23 +549,62 @@ class SymmetricMultiViewEncoder(nn.Module):
             patch_w,
             output_size,
         )
-        depth, depth_uncertainty, confidence = self.depth_predictor(
-            lowres_features=lowres_geometry,
-            fullres_features=fullres_geometry,
+        return EncodedViewFeatures(
             images=images,
+            lowres_geometry=lowres_geometry,
+            fullres_geometry=fullres_geometry,
+        )
+
+    def decode_views(
+        self,
+        encoded: EncodedViewFeatures,
+        intrinsics: torch.Tensor,
+        extrinsics: torch.Tensor,
+    ) -> ViewEncoderOutput:
+        depth, depth_uncertainty, confidence = self.depth_predictor(
+            lowres_features=encoded.lowres_geometry,
+            fullres_features=encoded.fullres_geometry,
+            images=encoded.images,
             intrinsics=intrinsics,
             extrinsics=extrinsics,
         )
+        appearance_features = self.appearance_adapter(encoded.fullres_geometry)
+        appearance_features = F.normalize(appearance_features, dim=1)
         appearance_features = F.interpolate(
-            images,
+            appearance_features,
             size=depth.shape[-2:],
             mode="bilinear",
             align_corners=True,
         )
+        appearance_context = torch.cat(
+            [
+                F.interpolate(
+                    encoded.fullres_geometry,
+                    size=depth.shape[-2:],
+                    mode="bilinear",
+                    align_corners=True,
+                ),
+                appearance_features,
+            ],
+            dim=1,
+        )
+        appearance_uncertainty = (
+            F.softplus(self.appearance_uncertainty_head(appearance_context))
+            + self.appearance_uncertainty_bias
+        )
+        relative_depth_uncertainty = depth_uncertainty / depth.clamp_min(self.min_depth)
+        positional_certainty = torch.exp(-relative_depth_uncertainty) * confidence
+        appearance_certainty = torch.exp(-appearance_uncertainty)
+        combined_certainty = positional_certainty * appearance_certainty
         return ViewEncoderOutput(
             appearance_features=appearance_features,
-            geometry_features=fullres_geometry,
+            geometry_features=encoded.fullres_geometry,
             depth=depth,
             depth_uncertainty=depth_uncertainty,
+            appearance_uncertainty=appearance_uncertainty,
+            positional_certainty=positional_certainty,
+            appearance_certainty=appearance_certainty,
+            combined_certainty=combined_certainty,
+            depth_confidence=confidence,
             confidence=confidence,
         )

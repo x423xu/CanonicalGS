@@ -24,19 +24,20 @@ class RenderStats:
     num_targets: int
 
 
-def compute_render_stats(
+def render_target_views(
     episode: dict,
     output: dict,
     max_targets: int | None = None,
-) -> RenderStats:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     target_indices = output["target_indices"]
     if max_targets is not None:
         target_indices = target_indices[:max_targets]
 
     if target_indices.numel() == 0:
         zero = output["readout"].support_probability.new_zeros(())
-        one = output["readout"].support_probability.new_ones(())
-        return RenderStats(mse=one, psnr=zero, coverage=zero, num_targets=0)
+        image_shape = tuple(episode["images"].shape[-2:])
+        empty = output["readout"].support_probability.new_zeros((0, 3, *image_shape))
+        return empty, empty, zero, 0
 
     target_images = episode["images"][target_indices]
     target_extrinsics = episode["extrinsics"][target_indices]
@@ -47,13 +48,31 @@ def compute_render_stats(
         intrinsics=target_intrinsics,
         image_shape=tuple(target_images.shape[-2:]),
     )
+    return rendered, target_images, coverage.mean(), int(target_indices.numel())
+
+
+def compute_render_stats(
+    episode: dict,
+    output: dict,
+    max_targets: int | None = None,
+) -> RenderStats:
+    rendered, target_images, coverage, num_targets = render_target_views(
+        episode,
+        output,
+        max_targets=max_targets,
+    )
+    if num_targets == 0:
+        zero = output["readout"].support_probability.new_zeros(())
+        one = output["readout"].support_probability.new_ones(())
+        return RenderStats(mse=one, psnr=zero, coverage=zero, num_targets=0)
+
     mse = F.mse_loss(rendered, target_images)
     psnr = -10.0 * torch.log10(mse.clamp_min(1e-8))
     return RenderStats(
         mse=mse,
         psnr=psnr,
-        coverage=coverage.mean(),
-        num_targets=int(target_indices.numel()),
+        coverage=coverage,
+        num_targets=num_targets,
     )
 
 

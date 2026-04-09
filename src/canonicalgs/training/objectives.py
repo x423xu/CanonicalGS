@@ -6,6 +6,8 @@ import torch
 
 from canonicalgs.config import ObjectiveConfig
 
+from .render_metrics import compute_render_stats, render_target_views
+
 
 @dataclass(slots=True)
 class LossBundle:
@@ -19,51 +21,64 @@ class LossBundle:
 class CanonicalLossComputer:
     def __init__(self, cfg: ObjectiveConfig) -> None:
         self.cfg = cfg
+        self.lpips = self._build_lpips_if_available()
 
-    def __call__(self, outputs: dict[int, dict]) -> LossBundle:
+    def __call__(
+        self,
+        outputs: dict[int, dict],
+        episode: dict | None = None,
+        max_render_targets: int | None = None,
+    ) -> LossBundle:
         context_sizes = sorted(outputs)
-        teacher_key = context_sizes[-1]
-        teacher = outputs[teacher_key]["readout"]
-        device = teacher.support_probability.device
+        largest_context = context_sizes[-1]
+        largest_output = outputs[largest_context]
+        device = largest_output["readout"].support_probability.device
 
-        render_loss = torch.zeros((), device=device)
-        convergence_terms = []
+        prefix_states = {context_size: output["state"] for context_size, output in outputs.items()}
+        decoded = {context_size: output["render_gaussians"] for context_size, output in outputs.items()}
+        renders = self._render_prefixes(outputs, episode, max_render_targets)
+        render_loss = self._compute_main_render_loss(
+            largest_output,
+            renders.get(largest_context),
+            episode=episode,
+            max_render_targets=max_render_targets,
+        )
+
         monotone_terms = []
-
-        teacher_lookup = self._readout_lookup(teacher)
-
-        for context_size in context_sizes[:-1]:
-            student = outputs[context_size]["readout"]
-            overlap = self._shared_entries(student, teacher_lookup)
-            if overlap is None:
-                continue
-            student_support, teacher_support, student_mean, teacher_mean, _, _, teacher_conf = overlap
-            mask = (
-                (teacher_support > self.cfg.teacher_support_threshold)
-                & (teacher_conf > self.cfg.teacher_confidence_threshold)
-            )
-            if torch.any(mask):
-                support_term = torch.abs(student_support[mask] - teacher_support[mask]).mean()
-                geometry_term = torch.abs(student_mean[mask] - teacher_mean[mask]).mean()
-                convergence_terms.append(support_term + geometry_term)
-
+        convergence_terms = []
         for lower_key, upper_key in zip(context_sizes[:-1], context_sizes[1:]):
-            lower = outputs[lower_key]["readout"]
-            upper = outputs[upper_key]["readout"]
-            overlap = self._shared_entries(lower, self._readout_lookup(upper))
-            if overlap is None:
-                continue
-            _, teacher_support, _, _, lower_uncert, upper_uncert, upper_conf = overlap
-            mask = (
-                (teacher_support > self.cfg.teacher_support_threshold)
-                & (upper_conf > self.cfg.teacher_confidence_threshold)
-            )
-            if torch.any(mask):
-                monotone_terms.append(torch.relu(upper_uncert[mask] - lower_uncert[mask]).mean())
+            lower_output = outputs[lower_key]
+            upper_output = outputs[upper_key]
+            lower_render = renders.get(lower_key)
+            upper_render = renders.get(upper_key)
+            _lower_state = prefix_states[lower_key]
+            _upper_state = prefix_states[upper_key]
+            _lower_decoded = decoded[lower_key]
+            _upper_decoded = decoded[upper_key]
 
-        low_conf_mask = teacher.confidence < self.cfg.low_confidence_threshold
-        if torch.any(low_conf_mask):
-            null_loss = teacher.support_probability[low_conf_mask].mean()
+            if lower_render is not None and upper_render is not None:
+                monotone_terms.append(torch.relu(upper_render.mse - lower_render.mse))
+
+            lower_readout = lower_output["readout"]
+            upper_readout = upper_output["readout"]
+            convergence_terms.append(
+                torch.relu(
+                    lower_readout.canonical_certainty.mean() - upper_readout.canonical_certainty.mean()
+                )
+                + torch.relu(
+                    upper_readout.uncertainty.mean() - lower_readout.uncertainty.mean()
+                )
+                + torch.relu(
+                    lower_readout.support_probability.mean() - upper_readout.support_probability.mean()
+                )
+            )
+
+        low_cert_mask = largest_output["readout"].canonical_certainty < self.cfg.low_confidence_threshold
+        if torch.any(low_cert_mask):
+            null_loss = (
+                largest_output["readout"].support_probability[low_cert_mask]
+                * (1.0 + largest_output["readout"].semantic_consistency[low_cert_mask])
+            ).mean()
         else:
             null_loss = torch.zeros((), device=device)
 
@@ -83,47 +98,59 @@ class CanonicalLossComputer:
             total_loss=total_loss,
         )
 
+    def _build_lpips_if_available(self):
+        if self.cfg.lambda_lpips <= 0.0:
+            return None
+        try:
+            import lpips  # type: ignore[import-not-found]
+        except ImportError:
+            return None
+        return lpips.LPIPS(net="vgg")
+
     def _stack_mean(self, values: list[torch.Tensor], device: torch.device) -> torch.Tensor:
         if not values:
             return torch.zeros((), device=device)
         return torch.stack(values).mean()
 
-    def _readout_lookup(self, readout) -> dict[tuple[int, int, int], tuple[torch.Tensor, ...]]:
-        lookup = {}
-        for index, support, mean, uncert, conf in zip(
-            readout.indices,
-            readout.support_probability,
-            readout.geometry_mean,
-            readout.uncertainty,
-            readout.confidence,
-        ):
-            lookup[tuple(int(v) for v in index.tolist())] = (support, mean, uncert, conf)
-        return lookup
+    def _render_prefixes(
+        self,
+        outputs: dict[int, dict],
+        episode: dict | None,
+        max_render_targets: int | None,
+    ) -> dict[int, object]:
+        if episode is None:
+            return {}
+        return {
+            context_size: compute_render_stats(
+                episode=episode,
+                output=output,
+                max_targets=max_render_targets,
+            )
+            for context_size, output in outputs.items()
+        }
 
-    def _shared_entries(self, readout, teacher_lookup):
-        keys = [tuple(int(v) for v in index.tolist()) for index in readout.indices]
-        keep_indices = [i for i, key in enumerate(keys) if key in teacher_lookup]
-        if not keep_indices:
-            return None
+    def _compute_main_render_loss(
+        self,
+        output: dict,
+        render_stats,
+        episode: dict | None,
+        max_render_targets: int | None,
+    ) -> torch.Tensor:
+        device = output["readout"].support_probability.device
+        if render_stats is None:
+            return torch.zeros((), device=device)
 
-        keep = torch.tensor(keep_indices, dtype=torch.long, device=readout.indices.device)
-        teacher_support = []
-        teacher_mean = []
-        teacher_uncert = []
-        teacher_conf = []
-        for i in keep_indices:
-            support, mean, uncert, conf = teacher_lookup[keys[i]]
-            teacher_support.append(support)
-            teacher_mean.append(mean)
-            teacher_uncert.append(uncert)
-            teacher_conf.append(conf)
+        render_loss = render_stats.mse
+        if self.lpips is None or episode is None or render_stats.num_targets == 0:
+            return render_loss
 
-        return (
-            readout.support_probability[keep],
-            torch.stack(teacher_support).to(readout.indices.device),
-            readout.geometry_mean[keep],
-            torch.stack(teacher_mean).to(readout.indices.device),
-            readout.uncertainty[keep],
-            torch.stack(teacher_uncert).to(readout.indices.device),
-            torch.stack(teacher_conf).to(readout.indices.device),
+        rendered, target_images, _, num_targets = render_target_views(
+            episode,
+            output,
+            max_targets=max_render_targets,
         )
+        if num_targets == 0:
+            return render_loss
+        lpips_module = self.lpips.to(device=device)
+        lpips_value = lpips_module(rendered * 2.0 - 1.0, target_images * 2.0 - 1.0).mean()
+        return render_loss + self.cfg.lambda_lpips * lpips_value

@@ -18,8 +18,11 @@ from .render_metrics import compute_render_metrics, compute_render_stats
 
 
 def run_scene_overfit_training(cfg: RootConfig) -> None:
+    builder_context_sizes = _stage_builder_context_sizes(cfg)
+    train_context_sizes = _sorted_unique(cfg.dataset.train_context_sizes)
+    eval_context_sizes = _sorted_unique(cfg.dataset.eval_context_sizes)
     builder = EpisodeBuilder(
-        context_sizes=tuple(cfg.dataset.context_sizes),
+        context_sizes=tuple(builder_context_sizes),
         target_views=cfg.dataset.target_views,
         min_frames_per_episode=cfg.dataset.min_frames_per_episode,
         subsample_to=cfg.dataset.subsample_to,
@@ -32,10 +35,10 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
         builder,
         episode_count,
         tuple(cfg.dataset.image_shape),
-        cfg.dataset.validation_holdout_stride,
-        cfg.dataset.validation_holdout_offset,
-        cfg.dataset.evaluation_holdout_stride,
-        cfg.dataset.evaluation_holdout_offset,
+        cfg.dataset.eval_holdout_stride,
+        cfg.dataset.eval_holdout_offset,
+        cfg.dataset.eval_holdout_stride,
+        cfg.dataset.eval_holdout_offset,
     )
     if len(episodes) <= cfg.train.overfit_scene_index:
         raise ValueError("not enough buildable RE10K episodes for requested overfit_scene_index")
@@ -55,31 +58,33 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
     if cfg.wandb.mode != "disabled":
         run = wandb.init(**build_wandb_kwargs(cfg.wandb, output_dir))
 
-    initial_summary = _evaluate_episode(cfg, pipeline, episode, loss_computer)
+    initial_summary = _evaluate_episode(cfg, pipeline, episode, loss_computer, eval_context_sizes)
     print(_format_summary("overfit_initial", initial_summary))
     train_context_size = cfg.train.overfit_train_context_size
-    if train_context_size not in cfg.dataset.context_sizes:
-        raise ValueError("train.overfit_train_context_size must be one of dataset.context_sizes")
+    if train_context_size not in train_context_sizes:
+        raise ValueError("train.overfit_train_context_size must be one of dataset.train_context_sizes")
 
     for step in range(1, cfg.train.overfit_steps + 1):
         pipeline.train()
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
-            outputs = {
-                train_context_size: pipeline(
-                    episode,
-                    train_context_size,
-                    include_render_payload=True,
-                )
-            }
-            losses = loss_computer(outputs)
+            outputs = pipeline.forward_prefixes(
+                episode,
+                context_sizes=train_context_sizes,
+                include_render_payload=True,
+            )
+            losses = loss_computer(
+                outputs,
+                episode=episode,
+                max_render_targets=cfg.train.render_train_target_views,
+            )
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=False):
             render_stats = compute_render_stats(
                 episode=episode,
                 output=outputs[train_context_size],
                 max_targets=cfg.train.render_train_target_views,
             )
-            total_loss = losses.total_loss.float() + cfg.objective.lambda_rend * render_stats.mse
+            total_loss = losses.total_loss.float()
         scaler.scale(total_loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -99,6 +104,9 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
                 metric_name("train", "gaussians", train_context_size): outputs[train_context_size]["num_gaussians"],
                 metric_name("train", "mean_confidence", train_context_size): outputs[train_context_size]["mean_confidence"],
                 metric_name("train", "mean_support", train_context_size): outputs[train_context_size]["mean_support"],
+                metric_name("train", "mean_semantic_consistency", train_context_size): outputs[train_context_size][
+                    "mean_semantic_consistency"
+                ],
                 metric_name("train", "mean_opacity", train_context_size): outputs[train_context_size]["mean_opacity"],
             }
             print(
@@ -114,7 +122,7 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
             if run is not None:
                 wandb.log(summary, step=step)
 
-    final_summary = _evaluate_episode(cfg, pipeline, episode, loss_computer)
+    final_summary = _evaluate_episode(cfg, pipeline, episode, loss_computer, eval_context_sizes)
     print(_format_summary("overfit_final", final_summary))
 
     summary_payload = {
@@ -149,7 +157,9 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
         run.log(
             {
                 "overfit/final_total_loss": final_summary["total_loss"],
-                "overfit/final_gaussians_ctx_6": final_summary["ctx_6"]["gaussians"],
+                f"overfit/final_gaussians_ctx_{max(eval_context_sizes)}": final_summary[
+                    f"ctx_{max(eval_context_sizes)}"
+                ]["gaussians"],
             },
             step=cfg.train.overfit_steps,
         )
@@ -161,6 +171,7 @@ def _evaluate_episode(
     pipeline: CanonicalGsPipeline,
     episode: dict,
     loss_computer: CanonicalLossComputer,
+    eval_context_sizes: list[int],
 ) -> dict[str, object]:
     pipeline.eval()
     amp_enabled = cfg.train.amp and next(pipeline.parameters()).device.type == "cuda"
@@ -170,15 +181,16 @@ def _evaluate_episode(
             dtype=torch.float16,
             enabled=amp_enabled,
         ):
-            outputs = {
-                context_size: pipeline(
-                    episode,
-                    context_size,
-                    include_render_payload=True,
-                )
-                for context_size in cfg.dataset.context_sizes
-            }
-            losses = loss_computer(outputs)
+            outputs = pipeline.forward_prefixes(
+                episode,
+                context_sizes=eval_context_sizes,
+                include_render_payload=True,
+            )
+            losses = loss_computer(
+                outputs,
+                episode=episode,
+                max_render_targets=cfg.train.render_eval_target_views,
+            )
 
     summary: dict[str, object] = {
         "structural_loss": float(losses.total_loss.item()),
@@ -186,7 +198,7 @@ def _evaluate_episode(
         "monotone_loss": float(losses.monotone_loss.item()),
         "null_loss": float(losses.null_loss.item()),
     }
-    for context_size in cfg.dataset.context_sizes:
+    for context_size in eval_context_sizes:
         context_output = outputs[context_size]
         render_metrics = compute_render_metrics(
             episode=episode,
@@ -202,15 +214,17 @@ def _evaluate_episode(
             "render_mse": render_metrics.mse,
             "render_psnr": render_metrics.psnr,
             "render_coverage": render_metrics.coverage,
-            "total_loss": float(losses.total_loss.item() + cfg.objective.lambda_rend * render_metrics.mse),
+            "total_loss": float(losses.total_loss.item()),
         }
-    largest_context = max(cfg.dataset.context_sizes)
+    largest_context = max(eval_context_sizes)
     summary["total_loss"] = summary[f"ctx_{largest_context}"]["total_loss"]
     return summary
 
 
 def _format_summary(prefix: str, summary: dict[str, object]) -> str:
-    ctx6 = summary["ctx_6"]
+    context_keys = sorted(key for key in summary if key.startswith("ctx_"))
+    ctx = summary[context_keys[-1]]
+    ctx_label = context_keys[-1]
     return (
         "[CanonicalGS] "
         f"{prefix} "
@@ -218,7 +232,15 @@ def _format_summary(prefix: str, summary: dict[str, object]) -> str:
         f"conv={summary['convergence_loss']:.6f} "
         f"mono={summary['monotone_loss']:.6f} "
         f"null={summary['null_loss']:.6f} "
-        f"ctx6_psnr={ctx6['render_psnr']:.3f} "
-        f"ctx6_gaussians={ctx6['gaussians']} "
-        f"ctx6_cells={ctx6['active_cells']}"
+        f"{ctx_label}_psnr={ctx['render_psnr']:.3f} "
+        f"{ctx_label}_gaussians={ctx['gaussians']} "
+        f"{ctx_label}_cells={ctx['active_cells']}"
     )
+
+
+def _stage_builder_context_sizes(cfg: RootConfig) -> list[int]:
+    return _sorted_unique(cfg.dataset.train_context_sizes, cfg.dataset.eval_context_sizes)
+
+
+def _sorted_unique(*groups: list[int]) -> list[int]:
+    return sorted({value for group in groups for value in group})
