@@ -13,6 +13,7 @@ from canonicalgs.logging import build_wandb_kwargs, metric_name
 from canonicalgs.model import CanonicalGsPipeline
 
 from .device import move_to_device, resolve_runtime_device
+from .eval_visualization import build_wandb_visual_log, save_evaluation_visualizations
 from .objectives import CanonicalLossComputer
 from .render_metrics import compute_render_metrics, compute_render_stats
 
@@ -39,6 +40,8 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
         cfg.dataset.eval_holdout_offset,
         cfg.dataset.eval_holdout_stride,
         cfg.dataset.eval_holdout_offset,
+        cfg.dataset.fixed_scene_count,
+        cfg.dataset.fixed_scene_seed,
     )
     if len(episodes) <= cfg.train.overfit_scene_index:
         raise ValueError("not enough buildable RE10K episodes for requested overfit_scene_index")
@@ -51,14 +54,21 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
     pipeline = CanonicalGsPipeline(cfg.model).to(device)
     optimizer = torch.optim.Adam(pipeline.parameters(), lr=cfg.train.bootstrap_lr)
     loss_computer = CanonicalLossComputer(cfg.objective)
-    amp_enabled = cfg.train.amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
     run = None
     if cfg.wandb.mode != "disabled":
         run = wandb.init(**build_wandb_kwargs(cfg.wandb, output_dir))
 
-    initial_summary = _evaluate_episode(cfg, pipeline, episode, loss_computer, eval_context_sizes)
+    initial_summary, initial_visuals = _evaluate_episode(
+        cfg,
+        pipeline,
+        episode,
+        loss_computer,
+        eval_context_sizes,
+        visualization_root=output_dir / "evaluation_visualizations",
+        phase="overfit_initial",
+        step=0,
+    )
     print(_format_summary("overfit_initial", initial_summary))
     train_context_size = cfg.train.overfit_train_context_size
     if train_context_size not in train_context_sizes:
@@ -67,43 +77,37 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
     for step in range(1, cfg.train.overfit_steps + 1):
         pipeline.train()
         optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
-            outputs = pipeline.forward_prefixes(
-                episode,
-                context_sizes=train_context_sizes,
-                include_render_payload=True,
-            )
-            losses = loss_computer(
-                outputs,
-                episode=episode,
-                max_render_targets=cfg.train.render_train_target_views,
-            )
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=False):
-            render_stats = compute_render_stats(
-                episode=episode,
-                output=outputs[train_context_size],
-                max_targets=cfg.train.render_train_target_views,
-            )
-            total_loss = losses.total_loss.float()
-        scaler.scale(total_loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        outputs = pipeline.forward_prefixes(
+            episode,
+            context_sizes=train_context_sizes,
+            include_render_payload=False,
+        )
+        losses = loss_computer(
+            outputs,
+            episode=episode,
+            max_render_targets=cfg.train.render_train_target_views,
+        )
+        render_stats = compute_render_stats(
+            episode=episode,
+            output=outputs[train_context_size],
+            max_targets=cfg.train.render_train_target_views,
+        )
+        total_loss = losses.total_loss.float()
+        total_loss.backward()
+        optimizer.step()
 
         if step % cfg.train.log_every == 0:
             summary = {
                 "train/step": step,
                 "train/total_loss": float(total_loss.item()),
-                "train/structural_loss": float(losses.total_loss.item()),
-                "train/convergence_loss": float(losses.convergence_loss.item()),
+                "train/render_loss": float(losses.render_loss.item()),
                 "train/monotone_loss": float(losses.monotone_loss.item()),
-                "train/null_loss": float(losses.null_loss.item()),
                 "train/render_mse": float(render_stats.mse.detach().item()),
                 "train/render_psnr": float(render_stats.psnr.detach().item()),
                 "train/render_coverage": float(render_stats.coverage.detach().item()),
                 metric_name("train", "active_cells", train_context_size): outputs[train_context_size]["num_active_cells"],
                 metric_name("train", "gaussians", train_context_size): outputs[train_context_size]["num_gaussians"],
                 metric_name("train", "mean_confidence", train_context_size): outputs[train_context_size]["mean_confidence"],
-                metric_name("train", "mean_support", train_context_size): outputs[train_context_size]["mean_support"],
                 metric_name("train", "mean_semantic_consistency", train_context_size): outputs[train_context_size][
                     "mean_semantic_consistency"
                 ],
@@ -113,16 +117,24 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
                 "[CanonicalGS] "
                 f"overfit_step={step} "
                 f"total={summary['train/total_loss']:.6f} "
-                f"conv={summary['train/convergence_loss']:.6f} "
+                f"render={summary['train/render_loss']:.6f} "
                 f"mono={summary['train/monotone_loss']:.6f} "
-                f"null={summary['train/null_loss']:.6f} "
                 f"psnr={summary['train/render_psnr']:.3f} "
                 f"gaussians_ctx_{train_context_size}={summary[metric_name('train', 'gaussians', train_context_size)]}"
             )
             if run is not None:
                 wandb.log(summary, step=step)
 
-    final_summary = _evaluate_episode(cfg, pipeline, episode, loss_computer, eval_context_sizes)
+    final_summary, final_visuals = _evaluate_episode(
+        cfg,
+        pipeline,
+        episode,
+        loss_computer,
+        eval_context_sizes,
+        visualization_root=output_dir / "evaluation_visualizations",
+        phase="overfit_final",
+        step=cfg.train.overfit_steps,
+    )
     print(_format_summary("overfit_final", final_summary))
 
     summary_payload = {
@@ -163,6 +175,8 @@ def run_scene_overfit_training(cfg: RootConfig) -> None:
             },
             step=cfg.train.overfit_steps,
         )
+        run.log(build_wandb_visual_log("overfit_initial", initial_visuals), step=0)
+        run.log(build_wandb_visual_log("overfit_final", final_visuals), step=cfg.train.overfit_steps)
         run.finish()
 
 
@@ -172,31 +186,36 @@ def _evaluate_episode(
     episode: dict,
     loss_computer: CanonicalLossComputer,
     eval_context_sizes: list[int],
-) -> dict[str, object]:
+    visualization_root: Path | None = None,
+    phase: str = "eval",
+    step: int | None = None,
+) -> tuple[dict[str, object], dict[int, dict[str, Path]]]:
     pipeline.eval()
-    amp_enabled = cfg.train.amp and next(pipeline.parameters()).device.type == "cuda"
     with torch.no_grad():
-        with torch.autocast(
-            device_type=next(pipeline.parameters()).device.type,
-            dtype=torch.float16,
-            enabled=amp_enabled,
-        ):
-            outputs = pipeline.forward_prefixes(
-                episode,
-                context_sizes=eval_context_sizes,
-                include_render_payload=True,
-            )
-            losses = loss_computer(
-                outputs,
+        outputs = pipeline.forward_prefixes(
+            episode,
+            context_sizes=eval_context_sizes,
+            include_render_payload=True,
+        )
+        losses = loss_computer(
+            outputs,
+            episode=episode,
+            max_render_targets=cfg.train.render_eval_target_views,
+        )
+        saved_visuals = {}
+        if visualization_root is not None:
+            saved_visuals = save_evaluation_visualizations(
+                output_root=visualization_root,
                 episode=episode,
-                max_render_targets=cfg.train.render_eval_target_views,
+                outputs=outputs,
+                phase=phase,
+                step=step,
             )
 
     summary: dict[str, object] = {
-        "structural_loss": float(losses.total_loss.item()),
-        "convergence_loss": float(losses.convergence_loss.item()),
+        "render_loss": float(losses.render_loss.item()),
         "monotone_loss": float(losses.monotone_loss.item()),
-        "null_loss": float(losses.null_loss.item()),
+        "total_loss": float(losses.total_loss.item()),
     }
     for context_size in eval_context_sizes:
         context_output = outputs[context_size]
@@ -209,16 +228,13 @@ def _evaluate_episode(
             "active_cells": int(context_output["num_active_cells"]),
             "gaussians": int(context_output["num_gaussians"]),
             "mean_confidence": float(context_output["mean_confidence"]),
-            "mean_support": float(context_output["mean_support"]),
             "mean_opacity": float(context_output["mean_opacity"]),
             "render_mse": render_metrics.mse,
             "render_psnr": render_metrics.psnr,
             "render_coverage": render_metrics.coverage,
             "total_loss": float(losses.total_loss.item()),
         }
-    largest_context = max(eval_context_sizes)
-    summary["total_loss"] = summary[f"ctx_{largest_context}"]["total_loss"]
-    return summary
+    return summary, saved_visuals
 
 
 def _format_summary(prefix: str, summary: dict[str, object]) -> str:
@@ -229,9 +245,8 @@ def _format_summary(prefix: str, summary: dict[str, object]) -> str:
         "[CanonicalGS] "
         f"{prefix} "
         f"total={summary['total_loss']:.6f} "
-        f"conv={summary['convergence_loss']:.6f} "
+        f"render={summary['render_loss']:.6f} "
         f"mono={summary['monotone_loss']:.6f} "
-        f"null={summary['null_loss']:.6f} "
         f"{ctx_label}_psnr={ctx['render_psnr']:.3f} "
         f"{ctx_label}_gaussians={ctx['gaussians']} "
         f"{ctx_label}_cells={ctx['active_cells']}"

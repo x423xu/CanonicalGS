@@ -22,6 +22,7 @@ from canonicalgs.training import (
     resolve_runtime_device,
     run_bootstrap_training,
     run_scene_overfit_training,
+    run_subset_smoke_test,
 )
 
 
@@ -81,6 +82,8 @@ def main(cfg_dict: DictConfig) -> None:
                     cfg.dataset.eval_holdout_offset,
                     cfg.dataset.eval_holdout_stride,
                     cfg.dataset.eval_holdout_offset,
+                    cfg.dataset.fixed_scene_count,
+                    cfg.dataset.fixed_scene_seed,
                 )
                 print(
                     "[CanonicalGS] "
@@ -107,6 +110,8 @@ def main(cfg_dict: DictConfig) -> None:
                     cfg.dataset.eval_holdout_offset,
                     cfg.dataset.eval_holdout_stride,
                     cfg.dataset.eval_holdout_offset,
+                    cfg.dataset.fixed_scene_count,
+                    cfg.dataset.fixed_scene_seed,
                 )
                 if tensor_episodes:
                     sample_tensors = tensor_episodes[0]
@@ -159,6 +164,8 @@ def main(cfg_dict: DictConfig) -> None:
             cfg.dataset.eval_holdout_offset,
             cfg.dataset.eval_holdout_stride,
             cfg.dataset.eval_holdout_offset,
+            cfg.dataset.fixed_scene_count,
+            cfg.dataset.fixed_scene_seed,
         )
         if not tensor_episodes:
             raise ValueError("no buildable RE10K tensor episodes found")
@@ -173,7 +180,7 @@ def main(cfg_dict: DictConfig) -> None:
             f"active_cells={result['num_active_cells']} "
             f"gaussians={result['num_gaussians']} "
             f"mean_confidence={result['mean_confidence']:.6f} "
-            f"mean_support={result['mean_support']:.6f} "
+            f"mean_semantic_consistency={result['mean_semantic_consistency']:.6f} "
             f"mean_opacity={result['mean_opacity']:.6f}"
         )
         print(
@@ -202,6 +209,8 @@ def main(cfg_dict: DictConfig) -> None:
             cfg.dataset.eval_holdout_offset,
             cfg.dataset.eval_holdout_stride,
             cfg.dataset.eval_holdout_offset,
+            cfg.dataset.fixed_scene_count,
+            cfg.dataset.fixed_scene_seed,
         )
         if not tensor_episodes:
             raise ValueError("no buildable RE10K tensor episodes found")
@@ -233,9 +242,9 @@ def main(cfg_dict: DictConfig) -> None:
             "[CanonicalGS] "
             f"surface_sum={state.surface_evidence.sum().item():.6f} "
             f"free_sum={state.free_evidence.sum().item():.6f} "
-            f"support_mean={readout.support_probability.mean().item():.6f} "
-            f"free_prob_mean={readout.free_probability.mean().item():.6f} "
-            f"unknown_mean={readout.unknown_probability.mean().item():.6f}"
+            f"canonical_certainty_mean={readout.canonical_certainty.mean().item():.6f} "
+            f"semantic_consistency_mean={readout.semantic_consistency.mean().item():.6f} "
+            f"uncertainty_mean={readout.uncertainty.mean().item():.6f}"
         )
         print(
             "[CanonicalGS] "
@@ -263,6 +272,8 @@ def main(cfg_dict: DictConfig) -> None:
             cfg.dataset.eval_holdout_offset,
             cfg.dataset.eval_holdout_stride,
             cfg.dataset.eval_holdout_offset,
+            cfg.dataset.fixed_scene_count,
+            cfg.dataset.fixed_scene_seed,
         )
         if not tensor_episodes:
             raise ValueError("no buildable RE10K tensor episodes found")
@@ -357,6 +368,8 @@ def main(cfg_dict: DictConfig) -> None:
             cfg.dataset.eval_holdout_offset,
             cfg.dataset.eval_holdout_stride,
             cfg.dataset.eval_holdout_offset,
+            cfg.dataset.fixed_scene_count,
+            cfg.dataset.fixed_scene_seed,
         )
         if not tensor_episodes:
             raise ValueError("no buildable RE10K tensor episodes found")
@@ -372,9 +385,8 @@ def main(cfg_dict: DictConfig) -> None:
         print(
             "[CanonicalGS] "
             f"loss_total={losses.total_loss.item():.6f} "
-            f"loss_conv={losses.convergence_loss.item():.6f} "
+            f"loss_render={losses.render_loss.item():.6f} "
             f"loss_mono={losses.monotone_loss.item():.6f} "
-            f"loss_null={losses.null_loss.item():.6f}"
         )
         return
 
@@ -384,6 +396,10 @@ def main(cfg_dict: DictConfig) -> None:
 
     if cfg.mode == "scene_overfit_train":
         run_scene_overfit_training(cfg)
+        return
+
+    if cfg.mode == "smoke_test_100scenes":
+        run_subset_smoke_test(cfg)
         return
 
     raise ValueError(f"unsupported mode: {cfg.mode}")

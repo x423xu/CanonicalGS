@@ -34,21 +34,23 @@ def render_target_views(
         target_indices = target_indices[:max_targets]
 
     if target_indices.numel() == 0:
-        zero = output["readout"].support_probability.new_zeros(())
+        zero = output["readout"].canonical_certainty.new_zeros(())
         image_shape = tuple(episode["images"].shape[-2:])
-        empty = output["readout"].support_probability.new_zeros((0, 3, *image_shape))
+        empty = output["readout"].canonical_certainty.new_zeros((0, 3, *image_shape))
         return empty, empty, zero, 0
 
     target_images = episode["images"][target_indices]
     target_extrinsics = episode["extrinsics"][target_indices]
     target_intrinsics = episode["intrinsics"][target_indices]
-    rendered, coverage = render_gaussian_views(
-        gaussians=output["render_gaussians"],
-        extrinsics=target_extrinsics,
-        intrinsics=target_intrinsics,
-        image_shape=tuple(target_images.shape[-2:]),
-    )
-    return rendered, target_images, coverage.mean(), int(target_indices.numel())
+    device_type = target_images.device.type
+    with torch.autocast(device_type=device_type, enabled=False):
+        rendered, coverage = render_gaussian_views(
+            gaussians=output["render_gaussians"],
+            extrinsics=target_extrinsics.float(),
+            intrinsics=target_intrinsics.float(),
+            image_shape=tuple(target_images.shape[-2:]),
+        )
+    return rendered.float(), target_images.float(), coverage.float().mean(), int(target_indices.numel())
 
 
 def compute_render_stats(
@@ -62,8 +64,8 @@ def compute_render_stats(
         max_targets=max_targets,
     )
     if num_targets == 0:
-        zero = output["readout"].support_probability.new_zeros(())
-        one = output["readout"].support_probability.new_ones(())
+        zero = output["readout"].canonical_certainty.new_zeros(())
+        one = output["readout"].canonical_certainty.new_ones(())
         return RenderStats(mse=one, psnr=zero, coverage=zero, num_targets=0)
 
     mse = F.mse_loss(rendered, target_images)

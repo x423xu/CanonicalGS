@@ -19,24 +19,25 @@ dataset:
 
 objective:
   lambda_rend: 1.0
-  lambda_conv: 0.2
   lambda_mono: 0.05
-  lambda_null: 0.001
-  teacher_support_threshold: 0.5
-  teacher_confidence_threshold: 0.5
-  low_confidence_threshold: 0.25
+  mono_on: true
 
 train:
   bootstrap_steps: 2
-  bootstrap_lr: 0.001
+  bootstrap_eval_every: 0
+  bootstrap_eval_num_scenes: 100
+  bootstrap_lr: 0.0001
+  debug: false
   log_every: 1
+  smoke_steps: 500
+  smoke_eval_every: 50
   overfit_steps: 100
   overfit_scene_index: 0
-  overfit_train_context_size: 6
+  overfit_train_context_size: 4
   render_train_target_views: 1
   render_eval_target_views: 2
   save_checkpoint: true
-  amp: true
+  amp: false
 
 runtime:
   device: cuda:7

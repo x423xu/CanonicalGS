@@ -13,11 +13,12 @@ from .dpt_head import DptFeatureHead
 
 @dataclass(slots=True)
 class ViewEncoderOutput:
+    input_rgb: torch.Tensor
     appearance_features: torch.Tensor
     geometry_features: torch.Tensor
     depth: torch.Tensor
-    depth_uncertainty: torch.Tensor
-    appearance_uncertainty: torch.Tensor
+    density: torch.Tensor
+    gaussian_raw_params: torch.Tensor
     positional_certainty: torch.Tensor
     appearance_certainty: torch.Tensor
     combined_certainty: torch.Tensor
@@ -122,7 +123,7 @@ class DinoV2Backbone(nn.Module):
     def forward(
         self,
         images: torch.Tensor,
-    ) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], int, int, tuple[int, int]]:
+    ) -> tuple[list[torch.Tensor], int, int, tuple[int, int]]:
         images = self._normalize(images)
         _, _, height, width = images.shape
         target_height = max(self.patch_size, math.floor(height / self.patch_size) * self.patch_size)
@@ -148,13 +149,13 @@ class DinoV2Backbone(nn.Module):
     def _extract_intermediate_layers(
         self,
         images: torch.Tensor,
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    ) -> list[torch.Tensor]:
         if self.is_fallback:
             return self.backbone(images, self.intermediate_layer_idx)
         return self.backbone.get_intermediate_layers(
             images,
             self.intermediate_layer_idx,
-            return_class_token=True,
+            return_class_token=False,
         )
 
     def _normalize(self, images: torch.Tensor) -> torch.Tensor:
@@ -194,16 +195,15 @@ class _FallbackPatchBackbone(nn.Module):
         self,
         images: torch.Tensor,
         intermediate_layer_idx: list[int],
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    ) -> list[torch.Tensor]:
         x = self.patch_embed(images)
-        outputs: list[tuple[torch.Tensor, torch.Tensor]] = []
+        outputs: list[torch.Tensor] = []
         target_layers = set(intermediate_layer_idx)
         for index, block in enumerate(self.blocks):
             x = block(x)
             if index in target_layers:
                 tokens = x.flatten(2).transpose(1, 2)
-                cls_token = tokens.mean(dim=1)
-                outputs.append((tokens, cls_token))
+                outputs.append(tokens)
         return outputs
 
 
@@ -226,19 +226,82 @@ class CostVolumeDepthPredictor(nn.Module):
         self.cost_volume_temperature = cost_volume_temperature
         self.cost_volume_visibility_beta = cost_volume_visibility_beta
 
-        self.depth_prior = nn.Conv2d(feature_dim, num_depth_bins, kernel_size=1)
-        self.cost_refiner = nn.Sequential(
-            DepthwiseSeparableBlock(num_depth_bins, num_depth_bins),
-            DepthwiseSeparableBlock(num_depth_bins, num_depth_bins),
-        )
-        self.fullres_refiner = nn.Sequential(
-            nn.Conv2d(feature_dim + 3, feature_dim, kernel_size=3, padding=1),
+        self.depth_head = nn.Sequential(
+            nn.Conv2d(feature_dim + num_depth_bins, feature_dim, kernel_size=3, padding=1),
             nn.GELU(),
             DepthwiseSeparableBlock(feature_dim, feature_dim),
-            DepthwiseSeparableBlock(feature_dim, feature_dim),
+            nn.Conv2d(feature_dim, num_depth_bins, kernel_size=1),
         )
-        self.inverse_depth_residual = nn.Conv2d(feature_dim, 1, kernel_size=1)
-        self.confidence_head = nn.Conv2d(feature_dim, 1, kernel_size=1)
+        self.cost_refine_head = nn.Sequential(
+            nn.Conv2d(num_depth_bins, num_depth_bins, kernel_size=3, padding=1),
+            nn.GELU(),
+            DepthwiseSeparableBlock(num_depth_bins, num_depth_bins),
+            nn.Conv2d(num_depth_bins, num_depth_bins, kernel_size=1),
+        )
+        certainty_hidden_dim = max(16, feature_dim // 2)
+        self.positional_certainty_head = nn.Sequential(
+            nn.Conv2d(num_depth_bins, certainty_hidden_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(certainty_hidden_dim, 1, kernel_size=1),
+        )
+        self.fullres_refine_head = nn.Sequential(
+            nn.Conv2d(feature_dim + 3 + 1, feature_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            DepthwiseSeparableBlock(feature_dim, feature_dim),
+            nn.Conv2d(feature_dim, 1, kernel_size=1),
+        )
+
+    def _estimate_scene_depth_bounds(
+        self,
+        extrinsics: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        centers = extrinsics[:, :3, 3]
+        if centers.shape[0] == 1:
+            return (
+                centers.new_tensor(self.min_depth),
+                centers.new_tensor(self.max_depth),
+            )
+
+        forward = F.normalize(extrinsics[:, :3, 2], dim=-1, eps=1e-6)
+        eye = torch.eye(3, dtype=centers.dtype, device=centers.device)
+        projectors = eye.unsqueeze(0) - forward.unsqueeze(-1) * forward.unsqueeze(-2)
+        normal_matrix = projectors.sum(dim=0) + 1e-3 * eye
+        rhs = torch.einsum("vij,vj->i", projectors, centers)
+        focus_point = torch.linalg.solve(normal_matrix, rhs)
+
+        world_to_camera = torch.linalg.inv(extrinsics)
+        focus_in_camera = (
+            torch.einsum("vij,j->vi", world_to_camera[:, :3, :3], focus_point)
+            + world_to_camera[:, :3, 3]
+        )
+        positive_depths = focus_in_camera[:, 2]
+        positive_depths = positive_depths[positive_depths > 1e-3]
+
+        pairwise = torch.cdist(centers, centers)
+        nonzero_baselines = pairwise[pairwise > 1e-6]
+        baseline = (
+            nonzero_baselines.median()
+            if nonzero_baselines.numel()
+            else centers.new_tensor(1.0)
+        )
+
+        if positive_depths.numel() >= 2:
+            near = torch.quantile(positive_depths, 0.1) * 0.8
+            far = torch.quantile(positive_depths, 0.9) * 1.2
+        elif positive_depths.numel() == 1:
+            near = positive_depths[0] * 0.8
+            far = positive_depths[0] * 1.2 + baseline * 2.0
+        else:
+            near = baseline * 0.5
+            far = baseline * 8.0
+
+        near = near.clamp(
+            min=self.min_depth,
+            max=max(self.min_depth, self.max_depth - 0.25),
+        )
+        far = torch.maximum(far, near + baseline.clamp_min(0.5))
+        far = far.clamp(min=near + 0.25, max=self.max_depth)
+        return near, far
 
     def forward(
         self,
@@ -250,26 +313,26 @@ class CostVolumeDepthPredictor(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_views, _, low_h, low_w = lowres_features.shape
         full_h, full_w = fullres_features.shape[-2:]
-        images_resized = F.interpolate(
-            images,
-            size=(full_h, full_w),
-            mode="bilinear",
-            align_corners=True,
-        )
+        normalized_lowres_features = F.normalize(lowres_features, dim=1)
+        scene_near, scene_far = self._estimate_scene_depth_bounds(extrinsics)
         inverse_depth_bins = torch.linspace(
-            1.0 / self.max_depth,
-            1.0 / self.min_depth,
+            1.0 / scene_far,
+            1.0 / scene_near,
             self.num_depth_bins,
             device=lowres_features.device,
             dtype=lowres_features.dtype,
         )
+        inverse_depth_min = inverse_depth_bins[0]
+        inverse_depth_max = inverse_depth_bins[-1]
+        inverse_depth_span = (inverse_depth_max - inverse_depth_min).clamp_min(1e-6)
         world_to_camera = torch.linalg.inv(extrinsics)
 
         depth_outputs = []
-        uncertainty_outputs = []
+        positional_certainty_outputs = []
         confidence_outputs = []
         for ref_index in range(num_views):
             ref_feature = lowres_features[ref_index : ref_index + 1]
+            ref_feature_normalized = normalized_lowres_features[ref_index : ref_index + 1]
             if num_views == 1:
                 aggregated_cost = torch.zeros(
                     (1, self.num_depth_bins, low_h, low_w),
@@ -282,99 +345,82 @@ class CostVolumeDepthPredictor(nn.Module):
                     device=lowres_features.device,
                 )
             else:
-                costs = []
-                visibilities = []
-                for source_index in range(num_views):
-                    if source_index == ref_index:
-                        continue
-                    warped, visibility = self._warp_feature_volume(
-                        lowres_features[source_index : source_index + 1],
-                        inverse_depth_bins,
-                        intrinsics[ref_index : ref_index + 1],
-                        extrinsics[ref_index : ref_index + 1],
-                        intrinsics[source_index : source_index + 1],
-                        world_to_camera[source_index : source_index + 1],
-                        (low_h, low_w),
-                    )
-                    ref_volume = ref_feature.unsqueeze(2).expand(-1, -1, self.num_depth_bins, -1, -1)
-                    pair_similarity = F.cosine_similarity(ref_volume, warped, dim=1)
-                    pair_cost = 1.0 - pair_similarity
-                    pair_cost = pair_cost * visibility + (1.0 - visibility)
-                    costs.append(pair_cost)
-                    visibilities.append(visibility)
-
-                stacked_costs = torch.cat(costs, dim=0)
-                stacked_visibilities = torch.cat(visibilities, dim=0)
+                source_indices = torch.cat(
+                    [
+                        torch.arange(ref_index, device=lowres_features.device),
+                        torch.arange(ref_index + 1, num_views, device=lowres_features.device),
+                    ]
+                )
+                num_sources = int(source_indices.numel())
+                warped, visibility = self._warp_feature_volume(
+                    normalized_lowres_features[source_indices],
+                    inverse_depth_bins,
+                    intrinsics[ref_index : ref_index + 1].expand(num_sources, -1, -1),
+                    extrinsics[ref_index : ref_index + 1].expand(num_sources, -1, -1),
+                    intrinsics[source_indices],
+                    world_to_camera[source_indices],
+                    (low_h, low_w),
+                )
+                stacked_costs = 1.0 - (
+                    warped * ref_feature_normalized.unsqueeze(2)
+                ).sum(dim=1)
+                stacked_costs = stacked_costs * visibility + (1.0 - visibility)
+                stacked_visibilities = visibility
                 aggregated_cost = self._aggregate_source_costs(
                     stacked_costs,
                     stacked_visibilities,
                 )
-                visibility_score = stacked_visibilities.mean(dim=(0, 1)).view(1, 1, low_h, low_w)
-
-            refined_cost = aggregated_cost + self.cost_refiner(aggregated_cost)
-            inverse_depth_logits = self.depth_prior(ref_feature) - refined_cost
-            depth_probability = torch.softmax(inverse_depth_logits, dim=1)
+            refined_cost = aggregated_cost + self.cost_refine_head(aggregated_cost)
+            depth_logits = self.depth_head(torch.cat([ref_feature, refined_cost], dim=1))
+            depth_probability = torch.softmax(depth_logits, dim=1)
 
             inverse_depth_lowres = (
                 depth_probability * inverse_depth_bins.view(1, self.num_depth_bins, 1, 1)
             ).sum(dim=1, keepdim=True)
-            inverse_depth_variance = (
-                depth_probability
-                * (
-                    inverse_depth_bins.view(1, self.num_depth_bins, 1, 1)
-                    - inverse_depth_lowres
-                ).square()
-            ).sum(dim=1, keepdim=True)
-            inverse_depth_uncertainty_lowres = inverse_depth_variance.sqrt().clamp_min(1e-6)
-            pdf_max = depth_probability.max(dim=1, keepdim=True).values
+            positional_certainty_lowres = torch.sigmoid(self.positional_certainty_head(refined_cost))
 
-            inverse_depth_fullres = F.interpolate(
+            inverse_depth = F.interpolate(
                 inverse_depth_lowres,
                 size=(full_h, full_w),
                 mode="bilinear",
                 align_corners=True,
             )
-            inverse_uncertainty_fullres = F.interpolate(
-                inverse_depth_uncertainty_lowres,
+            ref_fullres_feature = fullres_features[ref_index : ref_index + 1]
+            ref_image = F.interpolate(
+                images[ref_index : ref_index + 1],
                 size=(full_h, full_w),
                 mode="bilinear",
                 align_corners=True,
             )
-            pdf_max_fullres = F.interpolate(
-                pdf_max,
+            refine_input = torch.cat([ref_fullres_feature, ref_image, inverse_depth], dim=1)
+            inverse_depth_residual = 0.25 * inverse_depth_span * torch.tanh(
+                self.fullres_refine_head(refine_input)
+            )
+            inverse_depth = (inverse_depth + inverse_depth_residual).clamp(
+                min=inverse_depth_min,
+                max=inverse_depth_max,
+            )
+            depth = inverse_depth.reciprocal().clamp_min(scene_near)
+            positional_certainty = F.interpolate(
+                positional_certainty_lowres,
                 size=(full_h, full_w),
                 mode="bilinear",
                 align_corners=True,
-            )
-            refine_input = torch.cat(
-                (
-                    fullres_features[ref_index : ref_index + 1],
-                    images_resized[ref_index : ref_index + 1],
-                ),
-                dim=1,
-            )
-            refined = self.fullres_refiner(refine_input)
-            inverse_depth_interval = (1.0 / self.min_depth - 1.0 / self.max_depth) / max(self.num_depth_bins - 1, 1)
-            inverse_depth_residual = torch.tanh(self.inverse_depth_residual(refined)) * inverse_depth_interval
-            inverse_depth = (inverse_depth_fullres + inverse_depth_residual).clamp(
-                1.0 / self.max_depth,
-                1.0 / self.min_depth,
-            )
-            depth = inverse_depth.reciprocal()
-            depth_uncertainty = (
-                inverse_uncertainty_fullres / inverse_depth.square().clamp_min(1e-6)
-            ).clamp_min(self.min_depth_uncertainty)
-            confidence = torch.sigmoid(self.confidence_head(refined))
-            normalized_inverse_uncertainty = inverse_uncertainty_fullres / max(inverse_depth_interval, 1e-6)
-            confidence = confidence * pdf_max_fullres / (1.0 + normalized_inverse_uncertainty)
+            ).clamp(0.0, 1.0)
+            confidence = F.interpolate(
+                depth_probability.max(dim=1, keepdim=True)[0],
+                size=(full_h, full_w),
+                mode="bilinear",
+                align_corners=True,
+            ).clamp(0.0, 1.0)
 
             depth_outputs.append(depth)
-            uncertainty_outputs.append(depth_uncertainty)
+            positional_certainty_outputs.append(positional_certainty)
             confidence_outputs.append(confidence)
 
         return (
             torch.cat(depth_outputs, dim=0),
-            torch.cat(uncertainty_outputs, dim=0),
+            torch.cat(positional_certainty_outputs, dim=0),
             torch.cat(confidence_outputs, dim=0),
         )
 
@@ -388,6 +434,7 @@ class CostVolumeDepthPredictor(nn.Module):
         source_world_to_camera: torch.Tensor,
         image_shape: tuple[int, int],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size = source_features.shape[0]
         height, width = image_shape
         device = source_features.device
         dtype = source_features.dtype
@@ -409,7 +456,7 @@ class CostVolumeDepthPredictor(nn.Module):
         homogeneous = torch.stack(
             (grid_x, grid_y, torch.ones_like(grid_x)),
             dim=0,
-        ).reshape(1, 3, -1)
+        ).reshape(1, 3, -1).expand(batch_size, -1, -1)
         reference_rays = torch.linalg.inv(intrinsics_ref) @ homogeneous
         reference_points = reference_rays.unsqueeze(2) * depth_bins.view(1, 1, num_depth_bins, 1)
 
@@ -425,13 +472,13 @@ class CostVolumeDepthPredictor(nn.Module):
 
         projected = torch.einsum("bij,bjdn->bidn", intrinsics_src, source_points)
         source_xy = projected[:, :2] / projected[:, 2:3].clamp_min(1e-6)
-        source_xy = source_xy.reshape(1, 2, num_depth_bins, height, width).permute(0, 2, 3, 4, 1)
+        source_xy = source_xy.reshape(batch_size, 2, num_depth_bins, height, width).permute(0, 2, 3, 4, 1)
         sample_grid = torch.empty_like(source_xy)
         sample_grid[..., 0] = 2.0 * source_xy[..., 0] / max(width - 1, 1) - 1.0
         sample_grid[..., 1] = 2.0 * source_xy[..., 1] / max(height - 1, 1) - 1.0
-        sample_grid = sample_grid.reshape(1, num_depth_bins * height, width, 2)
+        sample_grid = sample_grid.reshape(batch_size, num_depth_bins * height, width, 2)
 
-        source_z = projected[:, 2].reshape(1, num_depth_bins, height, width)
+        source_z = projected[:, 2].reshape(batch_size, num_depth_bins, height, width)
         visibility = (
             (source_z > 1e-6)
             & (source_xy[..., 0] >= 0.0)
@@ -447,7 +494,7 @@ class CostVolumeDepthPredictor(nn.Module):
             padding_mode="zeros",
             align_corners=True,
         )
-        warped = warped.reshape(1, source_features.shape[1], num_depth_bins, height, width)
+        warped = warped.reshape(batch_size, source_features.shape[1], num_depth_bins, height, width)
         warped = warped * visibility.unsqueeze(1)
         return warped, visibility
 
@@ -482,6 +529,8 @@ class SymmetricMultiViewEncoder(nn.Module):
         min_depth: float = 0.25,
         max_depth: float = 8.0,
         min_depth_uncertainty: float = 0.05,
+        positional_certainty_tau: float = 0.5,
+        max_positional_uncertainty: float = 5.0,
         num_depth_bins: int = 32,
         cost_volume_temperature: float = 0.35,
         cost_volume_visibility_beta: float = 0.2,
@@ -491,6 +540,7 @@ class SymmetricMultiViewEncoder(nn.Module):
         freeze_dinov2: bool = True,
         allow_dinov2_fallback: bool = False,
         appearance_uncertainty_bias: float = 0.05,
+        appearance_uncertainty_init: float = 0.05,
     ) -> None:
         super().__init__()
         self.backbone = DinoV2Backbone(
@@ -506,7 +556,7 @@ class SymmetricMultiViewEncoder(nn.Module):
             lowres_out_channels=feature_dim,
             fullres_out_channels=feature_dim,
             output_stride=dpt_output_stride,
-            use_clstoken=True,
+            use_clstoken=False,
         )
         self.depth_predictor = CostVolumeDepthPredictor(
             feature_dim=feature_dim,
@@ -518,19 +568,34 @@ class SymmetricMultiViewEncoder(nn.Module):
             cost_volume_visibility_beta=cost_volume_visibility_beta,
         )
         self.min_depth = min_depth
+        self.positional_certainty_tau = positional_certainty_tau
+        self.max_positional_uncertainty = max_positional_uncertainty
         self.appearance_adapter = nn.Sequential(
             nn.Conv2d(feature_dim, feature_dim, kernel_size=3, padding=1),
             nn.GELU(),
             DepthwiseSeparableBlock(feature_dim, feature_dim),
             nn.Conv2d(feature_dim, appearance_dim, kernel_size=1),
         )
-        self.appearance_uncertainty_head = nn.Sequential(
+        self.appearance_certainty_head = nn.Sequential(
             nn.Conv2d(feature_dim + appearance_dim, feature_dim, kernel_size=3, padding=1),
             nn.GELU(),
             DepthwiseSeparableBlock(feature_dim, feature_dim),
             nn.Conv2d(feature_dim, 1, kernel_size=1),
         )
-        self.appearance_uncertainty_bias = appearance_uncertainty_bias
+        d_sh = (4 + 1) ** 2
+        gaussian_raw_channels = 2 + 7 + 3 * d_sh
+        self.gaussian_param_head = nn.Sequential(
+            nn.Conv2d(feature_dim + appearance_dim + 3, feature_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            DepthwiseSeparableBlock(feature_dim, feature_dim),
+            nn.Conv2d(feature_dim, gaussian_raw_channels, kernel_size=1),
+        )
+        self.density_head = nn.Sequential(
+            nn.Conv2d(feature_dim + appearance_dim + 3 + 1, feature_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            DepthwiseSeparableBlock(feature_dim, feature_dim),
+            nn.Conv2d(feature_dim, 1, kernel_size=1),
+        )
 
     def forward(
         self,
@@ -561,7 +626,7 @@ class SymmetricMultiViewEncoder(nn.Module):
         intrinsics: torch.Tensor,
         extrinsics: torch.Tensor,
     ) -> ViewEncoderOutput:
-        depth, depth_uncertainty, confidence = self.depth_predictor(
+        depth, positional_certainty, confidence = self.depth_predictor(
             lowres_features=encoded.lowres_geometry,
             fullres_features=encoded.fullres_geometry,
             images=encoded.images,
@@ -576,32 +641,41 @@ class SymmetricMultiViewEncoder(nn.Module):
             mode="bilinear",
             align_corners=True,
         )
+        geometry_features = F.interpolate(
+            encoded.fullres_geometry,
+            size=depth.shape[-2:],
+            mode="bilinear",
+            align_corners=True,
+        )
+        input_rgb = F.interpolate(
+            encoded.images,
+            size=depth.shape[-2:],
+            mode="bilinear",
+            align_corners=True,
+        )
         appearance_context = torch.cat(
             [
-                F.interpolate(
-                    encoded.fullres_geometry,
-                    size=depth.shape[-2:],
-                    mode="bilinear",
-                    align_corners=True,
-                ),
+                geometry_features,
                 appearance_features,
             ],
             dim=1,
         )
-        appearance_uncertainty = (
-            F.softplus(self.appearance_uncertainty_head(appearance_context))
-            + self.appearance_uncertainty_bias
-        )
-        relative_depth_uncertainty = depth_uncertainty / depth.clamp_min(self.min_depth)
-        positional_certainty = torch.exp(-relative_depth_uncertainty) * confidence
-        appearance_certainty = torch.exp(-appearance_uncertainty)
-        combined_certainty = positional_certainty * appearance_certainty
+        appearance_certainty = torch.sigmoid(self.appearance_certainty_head(appearance_context))
+        combined_certainty = (positional_certainty * appearance_certainty).clamp(0.0, 1.0)
+        gaussian_context = torch.cat([geometry_features, appearance_features, input_rgb], dim=1)
+        gaussian_raw_params = self.gaussian_param_head(gaussian_context)
+        density = torch.sigmoid(
+            self.density_head(
+                torch.cat([gaussian_context, confidence], dim=1),
+            )
+        ) * confidence
         return ViewEncoderOutput(
+            input_rgb=input_rgb,
             appearance_features=appearance_features,
-            geometry_features=encoded.fullres_geometry,
+            geometry_features=geometry_features,
             depth=depth,
-            depth_uncertainty=depth_uncertainty,
-            appearance_uncertainty=appearance_uncertainty,
+            density=density,
+            gaussian_raw_params=gaussian_raw_params,
             positional_certainty=positional_certainty,
             appearance_certainty=appearance_certainty,
             combined_certainty=combined_certainty,

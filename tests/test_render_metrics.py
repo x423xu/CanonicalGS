@@ -24,7 +24,7 @@ def test_compute_render_metrics_runs_with_gaussians() -> None:
     }
     output = {
         "target_indices": torch.tensor([0], dtype=torch.long, device=device),
-        "readout": type("Readout", (), {"support_probability": torch.ones(1, device=device)})(),
+        "readout": type("Readout", (), {"canonical_certainty": torch.ones(1, device=device)})(),
         "render_gaussians": GaussianSet(
             indices=torch.tensor([[0, 0, 0]], dtype=torch.long, device=device),
             means=torch.tensor([[0.0, 0.0, 2.0]], dtype=torch.float32, device=device),
