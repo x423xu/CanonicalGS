@@ -1,0 +1,14 @@
+channels:
+  - nvidia/label/cuda-12.4.0
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10.2
+  - pip
+  - wheel
+  - ninja
+  - git
+  - gcc=9.5
+  - gxx=9.5
+  - cuda-toolkit=12.4
+  - openblas
