@@ -94,6 +94,84 @@ export CXX="$CANONICALGS_CXX"
 export LIBRARY_PATH="$CANONICALGS_ENV_PREFIX/lib:${LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="$CANONICALGS_ENV_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
+apply_swin3d_patch() {
+  "$PYTHON" - "$REPO_ROOT/third_party/Swin3D" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+path = root / "Swin3D/models/Swin3D.py"
+text = path.read_text()
+text = text.replace(
+    "num_layers=5, num_classes=13, stem_transformer=True, first_down_stride=2, upsample='linear', knn_down=True, \\\n            in_channels=6, cRSE='XYZ_RGB', fp16_mode=0):",
+    "num_layers=5, num_classes=13, stem_transformer=True, first_down_stride=2, other_down_stride=2, upsample='linear', knn_down=True, \\\n            in_channels=6, cRSE='XYZ_RGB', fp16_mode=0, stem_norm='bn'):",
+)
+if "norm=stem_norm" not in text:
+    text = text.replace(
+        "                    kernel_size=3,\n                    stride=1,\n                )",
+        "                    kernel_size=3,\n                    stride=1,\n                    norm=stem_norm,\n                )",
+        1,
+    )
+text = text.replace(
+    "down_stride=first_down_stride if i==0 else 2,",
+    "down_stride=first_down_stride if i==0 else other_down_stride,",
+    1,
+)
+path.write_text(text)
+
+path = root / "Swin3D/modules/mink_layers.py"
+text = path.read_text()
+old = """        bias=False,
+        dimension=3,
+    ):
+        super().__init__()
+        self.conv_layers = nn.Sequential(
+            ME.MinkowskiConvolution(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                dilation=dilation,
+                bias=bias,
+                dimension=dimension,
+            ),
+            ME.MinkowskiBatchNorm(out_channels),
+            ME.MinkowskiReLU(inplace=True),
+        )
+"""
+new = """        bias=False,
+        dimension=3,
+        norm='bn',
+    ):
+        super().__init__()
+        if norm == 'bn':
+            norm_layer = ME.MinkowskiBatchNorm(out_channels)
+        elif norm == 'in':
+            norm_layer = ME.MinkowskiInstanceNorm(out_channels)
+        else:
+            raise ValueError(f\"unsupported sparse conv norm: {norm}\")
+        self.conv_layers = nn.Sequential(
+            ME.MinkowskiConvolution(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                dilation=dilation,
+                bias=bias,
+                dimension=dimension,
+            ),
+            norm_layer,
+            ME.MinkowskiReLU(inplace=True),
+        )
+"""
+if old in text:
+    text = text.replace(old, new, 1)
+path.write_text(text)
+PY
+}
+
+
 install_minkowski_engine() {
   local build_dir
   build_dir="$(mktemp -d "${TMPDIR:-/tmp}/canonicalgs-minkowski.XXXXXX")"
@@ -179,6 +257,7 @@ rm -f "$REQ_WITHOUT_LOCAL_BUILD"
 # MinkowskiEngine is required by Swin3D and CanonicalGS. Build it from source
 # inside this conda environment; no existing environment or system toolkit is copied.
 install_minkowski_engine
+apply_swin3d_patch
 
 "${PIP[@]}" install -e "$REPO_ROOT"
 (

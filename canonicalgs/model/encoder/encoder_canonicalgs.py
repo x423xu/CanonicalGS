@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Optional, List
 
 import torch
@@ -1032,7 +1033,9 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             # torch.save(gs_cube.F, 'notes/gscube_feats.pth')
             # torch.save(gs_cube.C, 'notes/gscube_coords.pth')
             nv = context["image"].shape[1]
-            torch.save(input_cube_tensor.sp.F, 'sem_seg/input_features_{}v/{}_features.pt'.format(nv,scene))
+            input_feature_dir = Path(f"sem_seg/input_features_{nv}v")
+            input_feature_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(input_cube_tensor.sp.F, input_feature_dir / f"{scene}_features.pt")
             cube_feat = rearrange(gs_cube.F, "n (c gpc) -> n c gpc", gpc=self.gpc)
             cube_opacities = cube_feat[:, :1].sigmoid()
             offset_xyz = cube_feat[:, 1:4].sigmoid()
