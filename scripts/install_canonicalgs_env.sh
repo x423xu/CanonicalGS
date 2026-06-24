@@ -142,28 +142,37 @@ old = """        bias=False,
 """
 new = """        bias=False,
         dimension=3,
-        norm='bn',
+        norm='bn'
     ):
         super().__init__()
-        if norm == 'bn':
-            norm_layer = ME.MinkowskiBatchNorm(out_channels)
-        elif norm == 'in':
-            norm_layer = ME.MinkowskiInstanceNorm(out_channels)
-        else:
-            raise ValueError(f\"unsupported sparse conv norm: {norm}\")
-        self.conv_layers = nn.Sequential(
-            ME.MinkowskiConvolution(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                dilation=dilation,
-                bias=bias,
-                dimension=dimension,
-            ),
-            norm_layer,
-            ME.MinkowskiReLU(inplace=True),
-        )
+        if norm=='bn':
+            self.conv_layers = nn.Sequential(
+                ME.MinkowskiConvolution(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    dilation=dilation,
+                    bias=bias,
+                    dimension=dimension,
+                ),
+                ME.MinkowskiBatchNorm(out_channels),
+                ME.MinkowskiReLU(inplace=True),
+            )
+        elif norm=='in':
+            self.conv_layers = nn.Sequential(
+                ME.MinkowskiConvolution(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    dilation=dilation,
+                    bias=bias,
+                    dimension=dimension,
+                ),
+                ME.MinkowskiInstanceNorm(out_channels),
+                ME.MinkowskiReLU(inplace=True),
+            )
 """
 if old in text:
     text = text.replace(old, new, 1)
