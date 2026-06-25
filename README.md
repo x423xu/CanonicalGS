@@ -18,7 +18,7 @@
 </p>
 <p align="center">
   <a href="assets/figs/teaser.jpg">
-    <img src="" alt="Logo" width="100%">
+    <img src="assets/figs/teaser.jpg" alt="CanonicalGS teaser" width="100%">
   </a>
 </p>
 
