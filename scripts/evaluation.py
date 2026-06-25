@@ -42,7 +42,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-scenes", type=int, default=100)
     parser.add_argument("--num-context-views", type=int, default=2)
     parser.add_argument("--cell-scale", type=float, default=2.8)
-    parser.add_argument("--cube-merge-type", default="max_conf")
+    parser.add_argument("--cube-merge-type", default="mean")
     parser.add_argument("--render-chunk-size", type=int, default=10)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--cuda-device", default=os.environ.get("CANONICALGS_CUDA_DEVICE", "9"))
@@ -73,12 +73,35 @@ def _bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def materialize_limited_index(index_path: Path, output_dir: Path, num_scenes: int) -> Path:
+    if num_scenes <= 0:
+        return index_path
+
+    with index_path.open("r") as f:
+        index = json.load(f)
+    if len(index) <= num_scenes:
+        return index_path
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    limited_index_path = output_dir / f"{index_path.stem}_first{num_scenes}{index_path.suffix}"
+    limited_index = dict(list(index.items())[:num_scenes])
+    with limited_index_path.open("w") as f:
+        json.dump(limited_index, f, indent=2)
+        f.write("\n")
+    return limited_index_path
+
+
 def build_overrides(args: argparse.Namespace, repo_root: Path) -> list[str]:
     checkpoint = _repo_path(repo_root, args.checkpoint)
-    index_path = _repo_path(repo_root, args.index_path)
     output_dir = args.output_dir
     if args.cell_scale is not None:
         output_dir = f"{output_dir}_scale{args.cell_scale}"
+    output_path = _repo_path(repo_root, output_dir)
+    index_path = materialize_limited_index(
+        _repo_path(repo_root, args.index_path),
+        output_path,
+        args.num_scenes,
+    )
 
     overrides = [
         "+experiment=re10k",
