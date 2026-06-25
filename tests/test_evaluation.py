@@ -16,8 +16,8 @@ def load_evaluation_module():
     return module
 
 
-def write_index(repo_root: Path, entries: int = 3) -> Path:
-    index_path = repo_root / "assets" / "re10k_2v_canonical_len100_indicies.json"
+def write_index(repo_root: Path, entries: int = 3, name: str = "re10k_2v.json") -> Path:
+    index_path = repo_root / "assets" / name
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps({
         f"scene_{idx}": {"context": [0, 1], "target": [2]}
@@ -29,12 +29,17 @@ def write_index(repo_root: Path, entries: int = 3) -> Path:
 class EvaluationScriptTest(unittest.TestCase):
     def setUp(self):
         self.previous_re10k_root = os.environ.get("CANONICALGS_RE10K_ROOT")
+        self.previous_dl3dv_root = os.environ.get("CANONICALGS_DL3DV_ROOT")
 
     def tearDown(self):
         if self.previous_re10k_root is None:
             os.environ.pop("CANONICALGS_RE10K_ROOT", None)
         else:
             os.environ["CANONICALGS_RE10K_ROOT"] = self.previous_re10k_root
+        if self.previous_dl3dv_root is None:
+            os.environ.pop("CANONICALGS_DL3DV_ROOT", None)
+        else:
+            os.environ["CANONICALGS_DL3DV_ROOT"] = self.previous_dl3dv_root
 
     def test_default_re10k_2v_len100_overrides(self):
         os.environ["CANONICALGS_RE10K_ROOT"] = "/datasets/re10k"
@@ -42,7 +47,7 @@ class EvaluationScriptTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
-            write_index(repo_root)
+            write_index(repo_root, entries=101)
             args = evaluation.parse_args([])
             overrides = evaluation.build_overrides(args, repo_root)
 
@@ -52,7 +57,7 @@ class EvaluationScriptTest(unittest.TestCase):
             override for override in overrides
             if override.startswith("dataset.view_sampler.index_path=")
         )
-        self.assertTrue(index_override.endswith("assets/re10k_2v_canonical_len100_indicies.json"))
+        self.assertTrue(index_override.endswith("outputs/evaluation/re10k_2v_scale3.0/re10k_2v_first100.json"))
         self.assertIn("dataset.view_sampler.num_context_views=2", overrides)
         self.assertIn("dataset.test_len=100", overrides)
         checkpoint_override = next(
@@ -69,6 +74,24 @@ class EvaluationScriptTest(unittest.TestCase):
         self.assertIn("model.encoder.scene_field_encoder_size=small", overrides)
         self.assertNotIn("model.encoder.cube_merge_type=mean", overrides)
 
+
+    def test_dl3dv_overrides_use_canonical_assets_and_checkpoint(self):
+        os.environ["CANONICALGS_DL3DV_ROOT"] = "/datasets/dl3dv"
+        evaluation = load_evaluation_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            write_index(repo_root, entries=139, name="dl3dv_2v.json")
+            args = evaluation.parse_args(["--dataset", "dl3dv"])
+            overrides = evaluation.build_overrides(args, repo_root)
+
+        self.assertIn("+experiment=dl3dv", overrides)
+        self.assertIn("dataset.roots=[/datasets/dl3dv]", overrides)
+        self.assertIn("checkpointing.pretrained_model=" + str(repo_root / "checkpoints/dl3dv.ckpt"), overrides)
+        self.assertIn("model.encoder.evidence_fusion_type=mean", overrides)
+        self.assertIn("dataset.near=0.5", overrides)
+        self.assertIn("dataset.far=210.0", overrides)
+        self.assertIn("dataset.image_shape=[256,256]", overrides)
 
     def test_num_scenes_materializes_capped_evaluation_index(self):
         evaluation = load_evaluation_module()
@@ -160,6 +183,17 @@ class EvaluationScriptTest(unittest.TestCase):
         self.assertNotIn("rename_checkpoints", evaluation_source)
         self.assertNotIn("rename_state_dict", evaluation_source)
         self.assertFalse((repo_root / "scripts" / "rename_checkpoints.py").exists())
+
+
+    def test_canonical_dl3dv_assets_have_expected_context_counts(self):
+        repo_root = Path(__file__).resolve().parents[1]
+
+        for views in (2, 4, 6, 8):
+            with self.subTest(views=views):
+                index_path = repo_root / "assets" / f"dl3dv_{views}v.json"
+                data = json.loads(index_path.read_text())
+                first_scene = next(iter(data.values()))
+                self.assertEqual(len(first_scene["context"]), views)
 
 
 if __name__ == "__main__":

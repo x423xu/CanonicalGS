@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Run CanonicalGS RE10K evaluation.
-
-The default path evaluates the transplanted RE10K 2-view CanonicalGS checkpoint on
-100 scenes using the canonical len100 evaluation index.
-"""
+"""Run CanonicalGS evaluation on RE10K or DL3DV."""
 
 from __future__ import annotations
 
@@ -14,25 +10,33 @@ import sys
 from pathlib import Path
 
 
-DEFAULT_RE10K_INDEX = Path("assets/re10k_2v_canonical_len100_indicies.json")
+DEFAULT_RE10K_INDEX = Path("assets/re10k_2v.json")
+DEFAULT_DL3DV_INDEX = Path("assets/dl3dv_2v.json")
 DEFAULT_RE10K_CHECKPOINT = Path("checkpoints/re10k.ckpt")
+DEFAULT_DL3DV_CHECKPOINT = Path("checkpoints/dl3dv.ckpt")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate CanonicalGS on RE10K.")
+    parser = argparse.ArgumentParser(description="Evaluate CanonicalGS.")
+    parser.add_argument("--dataset", choices=("re10k", "dl3dv"), default="re10k")
+    parser.add_argument(
+        "--data-root",
+        default=None,
+        help="Dataset root. Defaults to CANONICALGS_RE10K_ROOT or CANONICALGS_DL3DV_ROOT.",
+    )
     parser.add_argument(
         "--re10k-root",
-        default=os.environ.get("CANONICALGS_RE10K_ROOT", "datasets/re10k"),
-        help="RE10K dataset root. Defaults to CANONICALGS_RE10K_ROOT or datasets/re10k.",
+        default=None,
+        help="Backward-compatible alias for --data-root when --dataset re10k.",
     )
     parser.add_argument(
         "--checkpoint",
-        default=str(DEFAULT_RE10K_CHECKPOINT),
+        default=None,
         help="Checkpoint path. Relative paths are resolved from the repository root.",
     )
     parser.add_argument(
         "--index-path",
-        default=str(DEFAULT_RE10K_INDEX),
+        default=None,
         help="Evaluation index path. Relative paths are resolved from the repository root.",
     )
     parser.add_argument("--output-dir", default="outputs/evaluation/re10k_2v")
@@ -74,6 +78,28 @@ def _bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def resolve_data_root(args: argparse.Namespace) -> str:
+    if args.data_root is not None:
+        return args.data_root
+    if args.dataset == "re10k":
+        if args.re10k_root is not None:
+            return args.re10k_root
+        return os.environ.get("CANONICALGS_RE10K_ROOT", "datasets/re10k")
+    return os.environ.get("CANONICALGS_DL3DV_ROOT", "datasets/dl3dv")
+
+
+def default_checkpoint(args: argparse.Namespace) -> Path:
+    if args.checkpoint is not None:
+        return Path(args.checkpoint)
+    return DEFAULT_RE10K_CHECKPOINT if args.dataset == "re10k" else DEFAULT_DL3DV_CHECKPOINT
+
+
+def default_index(args: argparse.Namespace) -> Path:
+    if args.index_path is not None:
+        return Path(args.index_path)
+    return DEFAULT_RE10K_INDEX if args.dataset == "re10k" else DEFAULT_DL3DV_INDEX
+
+
 def materialize_limited_index(index_path: Path, output_dir: Path, num_scenes: int) -> Path:
     if num_scenes <= 0:
         return index_path
@@ -93,20 +119,20 @@ def materialize_limited_index(index_path: Path, output_dir: Path, num_scenes: in
 
 
 def build_overrides(args: argparse.Namespace, repo_root: Path) -> list[str]:
-    checkpoint = _repo_path(repo_root, args.checkpoint)
+    checkpoint = _repo_path(repo_root, default_checkpoint(args))
     output_dir = args.output_dir
     if args.voxel_resolution_scale is not None:
         output_dir = f"{output_dir}_scale{args.voxel_resolution_scale}"
     output_path = _repo_path(repo_root, output_dir)
     index_path = materialize_limited_index(
-        _repo_path(repo_root, args.index_path),
+        _repo_path(repo_root, default_index(args)),
         output_path,
         args.num_scenes,
     )
 
     overrides = [
-        "+experiment=re10k",
-        f"dataset.roots=[{args.re10k_root}]",
+        f"+experiment={args.dataset}",
+        f"dataset.roots=[{resolve_data_root(args)}]",
         "data_loader.train.batch_size=2",
         "data_loader.test.batch_size=1",
         f"data_loader.test.num_workers={args.num_workers}",
@@ -139,14 +165,23 @@ def build_overrides(args: argparse.Namespace, repo_root: Path) -> list[str]:
         "model.encoder.scene_field_encoder_size=small",
         f"model.encoder.evidence_fusion_type={args.evidence_fusion_type}",
     ]
+    if args.dataset == "dl3dv":
+        overrides.extend([
+            "model.encoder.num_scales=1",
+            "model.encoder.monodepth_vit_type=vits",
+            "dataset.near=0.5",
+            "dataset.far=210.0",
+            "dataset.image_shape=[256,256]",
+        ])
     return overrides
 
 
 def validate_inputs(args: argparse.Namespace, repo_root: Path) -> None:
+    data_root = resolve_data_root(args)
     paths = {
-        "checkpoint": _repo_path(repo_root, args.checkpoint),
-        "index": _repo_path(repo_root, args.index_path),
-        "re10k root": Path(args.re10k_root),
+        "checkpoint": _repo_path(repo_root, default_checkpoint(args)),
+        "index": _repo_path(repo_root, default_index(args)),
+        f"{args.dataset} root": Path(data_root),
     }
     missing = [f"{name}: {path}" for name, path in paths.items() if not path.exists()]
     if missing:

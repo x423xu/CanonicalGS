@@ -101,20 +101,137 @@ CanonicalGS does not require Git LFS. Checkpoints are ignored by git so accident
 
 ## Inference and Evaluation
 
-### RealEstate10K
-
-Use `scripts/evaluation.py` for the default 2-view RealEstate10K evaluation. It sets the CanonicalGS scene-field overrides and can cap the number of scenes for quick tests.
+The commands below mirror the historical GS-Cube evaluation scripts, but use only CanonicalGS paths under `assets/` and the renamed CanonicalGS checkpoints. They evaluate the first 100 scenes by default for practical reproduction; change `--num-scenes` to run a different subset.
 
 ```bash
 export CANONICALGS_RE10K_ROOT=/path/to/datasets/re10k
+export CANONICALGS_DL3DV_ROOT=/path/to/datasets/dl3dv
+```
+
+### RealEstate10K
+
+```bash
+# 2 context views
 CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --dataset re10k \
+  --data-root "$CANONICALGS_RE10K_ROOT" \
   --checkpoint checkpoints/re10k.ckpt \
   --index-path assets/re10k_2v.json \
   --output-dir outputs/evaluation/re10k_2v \
+  --num-context-views 2 \
   --num-scenes 100 \
   --evidence-fusion-type mean \
   --voxel-resolution-scale 3.0 \
   --cuda-device 0
+
+# 4 context views
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --dataset re10k \
+  --data-root "$CANONICALGS_RE10K_ROOT" \
+  --checkpoint checkpoints/re10k.ckpt \
+  --index-path assets/re10k_4v.json \
+  --output-dir outputs/evaluation/re10k_4v \
+  --num-context-views 4 \
+  --num-scenes 100 \
+  --evidence-fusion-type mean \
+  --voxel-resolution-scale 3.0 \
+  --cuda-device 0
+
+# 6 context views
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --dataset re10k \
+  --data-root "$CANONICALGS_RE10K_ROOT" \
+  --checkpoint checkpoints/re10k.ckpt \
+  --index-path assets/re10k_6v.json \
+  --output-dir outputs/evaluation/re10k_6v \
+  --num-context-views 6 \
+  --num-scenes 100 \
+  --evidence-fusion-type mean \
+  --voxel-resolution-scale 3.0 \
+  --cuda-device 0
+
+# 8 context views, matching the historical grouped-depth and anchor-feature setting
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --dataset re10k \
+  --data-root "$CANONICALGS_RE10K_ROOT" \
+  --checkpoint checkpoints/re10k.ckpt \
+  --index-path assets/re10k_8v.json \
+  --output-dir outputs/evaluation/re10k_8v \
+  --num-context-views 8 \
+  --num-scenes 100 \
+  --evidence-fusion-type mean \
+  --voxel-resolution-scale 3.0 \
+  --grouped-depth-estimation \
+  --depth-group-size 4 \
+  --use-grouped-scene-features \
+  --aggregation-group-size 4 \
+  --cuda-device 0
+
+```
+
+### DL3DV
+
+```bash
+# 2 context views
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --dataset dl3dv \
+  --data-root "$CANONICALGS_DL3DV_ROOT" \
+  --checkpoint checkpoints/dl3dv.ckpt \
+  --index-path assets/dl3dv_2v.json \
+  --output-dir outputs/evaluation/dl3dv_2v \
+  --num-context-views 2 \
+  --num-scenes 100 \
+  --evidence-fusion-type mean \
+  --voxel-resolution-scale 3.0 \
+  --cuda-device 0
+
+# 4 context views
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --dataset dl3dv \
+  --data-root "$CANONICALGS_DL3DV_ROOT" \
+  --checkpoint checkpoints/dl3dv.ckpt \
+  --index-path assets/dl3dv_4v.json \
+  --output-dir outputs/evaluation/dl3dv_4v \
+  --num-context-views 4 \
+  --num-scenes 100 \
+  --evidence-fusion-type mean \
+  --voxel-resolution-scale 3.0 \
+  --cuda-device 0
+
+# 6 context views, matching the historical grouped-depth and anchor-feature setting
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --dataset dl3dv \
+  --data-root "$CANONICALGS_DL3DV_ROOT" \
+  --checkpoint checkpoints/dl3dv.ckpt \
+  --index-path assets/dl3dv_6v.json \
+  --output-dir outputs/evaluation/dl3dv_6v \
+  --num-context-views 6 \
+  --num-scenes 100 \
+  --evidence-fusion-type mean \
+  --voxel-resolution-scale 3.0 \
+  --grouped-depth-estimation \
+  --depth-group-size 3 \
+  --use-grouped-scene-features \
+  --aggregation-group-size 3 \
+  --cuda-device 0
+
+# 8 context views, matching the historical grouped-depth and anchor-feature setting
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --dataset dl3dv \
+  --data-root "$CANONICALGS_DL3DV_ROOT" \
+  --checkpoint checkpoints/dl3dv.ckpt \
+  --index-path assets/dl3dv_8v.json \
+  --output-dir outputs/evaluation/dl3dv_8v \
+  --num-context-views 8 \
+  --num-scenes 100 \
+  --evidence-fusion-type mean \
+  --voxel-resolution-scale 3.0 \
+  --grouped-depth-estimation \
+  --depth-group-size 4 \
+  --use-grouped-scene-features \
+  --aggregation-group-size 4 \
+  --cuda-device 0
+
 ```
 
 To save qualitative outputs, add flags such as `--save-image`, `--save-gt-image`, `--save-depth`, or `--save-gaussian`.
@@ -122,11 +239,13 @@ To save qualitative outputs, add flags such as `--save-image`, `--save-gt-image`
 To export the learned scene latent feature before the GP decoder, use `--output-latent-scene`. This export is intended for one scene at a time, so `--num-scenes` must be exactly `1`.
 
 ```bash
-export CANONICALGS_RE10K_ROOT=/path/to/datasets/re10k
 CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --dataset re10k \
+  --data-root "$CANONICALGS_RE10K_ROOT" \
   --checkpoint checkpoints/re10k.ckpt \
   --index-path assets/re10k_2v.json \
   --output-dir outputs/latent_scene/re10k_2v \
+  --num-context-views 2 \
   --num-scenes 1 \
   --evidence-fusion-type mean \
   --voxel-resolution-scale 3.0 \
@@ -135,23 +254,6 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
 ```
 
 The output is saved as `outputs/latent_scene/re10k_2v_scale3.0/latent_scene/<scene>/latent_scene.pt` and contains `latent_scene`, sparse `coords`, scene-lattice metadata, and camera metadata.
-
-### DL3DV
-
-DL3DV evaluation uses the Hydra entrypoint directly. Change the index and `num_context_views` together for 2/4/6/8-view evaluation.
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m canonicalgs.main +experiment=dl3dv \
-  mode=test \
-  dataset.roots=[/path/to/datasets/dl3dv] \
-  dataset/view_sampler=evaluation \
-  dataset.view_sampler.index_path=assets/dl3dv_2v.json \
-  dataset.view_sampler.num_context_views=2 \
-  checkpointing.pretrained_model=checkpoints/dl3dv.ckpt \
-  test.compute_scores=true \
-  test.render_chunk_size=10 \
-  output_dir=outputs/evaluation/dl3dv_2v
-```
 
 ## Training
 
