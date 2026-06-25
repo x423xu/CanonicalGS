@@ -17,7 +17,7 @@
   <div align="center"></div>
 </p>
 <p align="center">
-  <a href="">
+  <a href="assets/figs/teaser.jpg">
     <img src="" alt="Logo" width="100%">
   </a>
 </p>

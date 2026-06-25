@@ -514,19 +514,7 @@ class DenseGaussianAdapter(nn.Module):
         # Create world-space covariance matrices.
         covariances = build_covariance(scales, rotations)
 
-        
-
-
-        # return Gaussians(
-        #     means=rearrange(batch_coords, "b r xyz -> b () r () () xyz"),
-        #     covariances=rearrange(covariances, "b r m n -> b () r () () m n"),
-        #     harmonics=rearrange(sh, "b r l m n k -> b () r l m n k"),
-        #     opacities=rearrange(batch_opacities, "b r m n -> b () r m n"),
-        #     # NOTE: These aren't yet rotated into world space, but they're only used for
-        #     # exporting Gaussians to ply files. This needs to be fixed...
-        #     scales=rearrange(scales, "b r n -> b () r () () n"),
-        #     rotations=rearrange(rotations.broadcast_to((*scales.shape[:-1], 4)), "b r n -> b () r () () n"),
-        # )
+    
         return Gaussians(
             means=rearrange(batch_coords, "b r gpv xyz -> b (r gpv) xyz"),
             covariances=rearrange(covariances, "b r gpv m n -> b (r gpv) m n"),

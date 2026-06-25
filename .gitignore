@@ -12,6 +12,7 @@ datasets/
 pretrained/
 sem_seg/
 tests/
+checkpoints/
 *.pt
 *.pth
 *.npy

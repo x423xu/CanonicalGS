@@ -38,7 +38,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default="outputs/evaluation/re10k_2v")
     parser.add_argument("--num-scenes", type=int, default=100)
     parser.add_argument("--num-context-views", type=int, default=2)
-    parser.add_argument("--voxel-resolution-scale", "--cell-scale", dest="voxel_resolution_scale", type=float, default=2.8)
+    parser.add_argument("--voxel-resolution-scale", "--cell-scale", dest="voxel_resolution_scale", type=float, default=3.0)
     parser.add_argument("--evidence-fusion-type", "--cube-merge-type", dest="evidence_fusion_type", default="mean")
     parser.add_argument("--render-chunk-size", type=int, default=10)
     parser.add_argument("--num-workers", type=int, default=4)
