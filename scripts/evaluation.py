@@ -59,7 +59,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--save-input-images", action="store_true")
     parser.add_argument("--no-strict-load", action="store_true")
     parser.add_argument("--print-config", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.output_latent_scene and args.num_scenes != 1:
+        parser.error("--output-latent-scene requires --num-scenes 1")
+    return args
 
 
 def _repo_path(repo_root: Path, value: str | Path) -> Path:

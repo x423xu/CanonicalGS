@@ -18,11 +18,13 @@
 </p>
 <p align="center">
   <a href="assets/figs/teaser.jpg">
-    <img src="assets/figs/teaser.jpg" alt="CanonicalGS teaser" width="100%">
+    <img src="assets/figs/teaser.jpg" alt="CanonicalGS teaser" width="90%">
   </a>
 </p>
 
-
+<p>
+CanonicalGS learns stable internal representations with increased input views. Such capability positions the feed-forward Gaussian splatting as not only a novel view renderer but also a canonical scene representation learner.
+</p>
 
 
 ## Installation
@@ -33,7 +35,6 @@ CanonicalGS is developed with Python 3.10, PyTorch 2.4.0, CUDA 12.4, MinkowskiEn
 git clone --recursive https://github.com/x423xu/CanonicalGS.git
 cd CanonicalGS
 
-git lfs pull
 bash scripts/install_canonicalgs_env.sh
 conda activate "$PWD/.conda/canonicalgs"
 ```
@@ -55,7 +56,7 @@ The script also initializes `third_party/Swin3D`, verifies the CanonicalGS Swin3
 
 ## Data Preparation
 
-CanonicalGS expects preprocessed PyTorch chunk datasets. Put data under `datasets/` or override `dataset.roots` in the commands below.
+CanonicalGS expects preprocessed PyTorch chunk datasets. Please refer to [depthsplat](https://github.com/cvg/depthsplat) for details. Put data under `datasets/` or override `dataset.roots` in the commands below.
 
 ```text
 datasets/
@@ -84,12 +85,19 @@ assets/re10k_2v.json   assets/re10k_4v.json   assets/re10k_6v.json   assets/re10
 assets/dl3dv_2v.json   assets/dl3dv_4v.json   assets/dl3dv_6v.json   assets/dl3dv_8v.json
 ```
 
-The released checkpoints are tracked with Git LFS:
+The released checkpoints are hosted on Hugging Face, not in git. Download them into `checkpoints/` before evaluation:
 
-```text
-checkpoints/re10k.ckpt
-checkpoints/dl3dv.ckpt
+```bash
+pip install -U huggingface_hub
+mkdir -p checkpoints
+
+# Replace this with the final Hugging Face repo id after release.
+export CANONICALGS_HF_REPO=<huggingface-user-or-org>/CanonicalGS
+huggingface-cli download "$CANONICALGS_HF_REPO" re10k.ckpt --local-dir checkpoints --local-dir-use-symlinks False
+huggingface-cli download "$CANONICALGS_HF_REPO" dl3dv.ckpt --local-dir checkpoints --local-dir-use-symlinks False
 ```
+
+CanonicalGS does not require Git LFS. Checkpoints are ignored by git so accidental large-file commits stay out of the repository.
 
 ## Inference and Evaluation
 
@@ -105,11 +113,28 @@ CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
   --output-dir outputs/evaluation/re10k_2v \
   --num-scenes 100 \
   --evidence-fusion-type mean \
-  --voxel-resolution-scale 2.8 \
+  --voxel-resolution-scale 3.0 \
   --cuda-device 0
 ```
 
 To save qualitative outputs, add flags such as `--save-image`, `--save-gt-image`, `--save-depth`, or `--save-gaussian`.
+
+To export the learned scene latent feature before the GP decoder, use `--output-latent-scene`. This export is intended for one scene at a time, so `--num-scenes` must be exactly `1`.
+
+```bash
+export CANONICALGS_RE10K_ROOT=/path/to/datasets/re10k
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluation.py \
+  --checkpoint checkpoints/re10k.ckpt \
+  --index-path assets/re10k_2v.json \
+  --output-dir outputs/latent_scene/re10k_2v \
+  --num-scenes 1 \
+  --evidence-fusion-type mean \
+  --voxel-resolution-scale 3.0 \
+  --cuda-device 0 \
+  --output-latent-scene
+```
+
+The output is saved as `outputs/latent_scene/re10k_2v_scale3.0/latent_scene/<scene>/latent_scene.pt` and contains `latent_scene`, sparse `coords`, scene-lattice metadata, and camera metadata.
 
 ### DL3DV
 

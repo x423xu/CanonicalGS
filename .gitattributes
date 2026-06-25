@@ -1,1 +1,1 @@
-*.ckpt filter=lfs diff=lfs merge=lfs -text
+# Large model checkpoints are hosted externally, not through Git LFS.

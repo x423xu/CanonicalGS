@@ -13,6 +13,9 @@ pretrained/
 sem_seg/
 tests/
 checkpoints/
+*.ckpt
+*.safetensors
+*.bin
 *.pt
 *.pth
 *.npy

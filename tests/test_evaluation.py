@@ -141,11 +141,17 @@ class EvaluationScriptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
             write_index(repo_root)
-            args = evaluation.parse_args(["--output-latent-scene"])
+            args = evaluation.parse_args(["--output-latent-scene", "--num-scenes", "1"])
             overrides = evaluation.build_overrides(args, repo_root)
 
         self.assertTrue(args.output_latent_scene)
         self.assertIn("test.output_latent_scene=true", overrides)
+
+    def test_output_latent_scene_requires_one_scene(self):
+        evaluation = load_evaluation_module()
+
+        with self.assertRaises(SystemExit):
+            evaluation.parse_args(["--output-latent-scene", "--num-scenes", "2"])
 
 
 if __name__ == "__main__":
