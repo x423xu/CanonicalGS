@@ -64,7 +64,7 @@ class EvaluationScriptTest(unittest.TestCase):
         self.assertIn("test.compute_scores=true", overrides)
         self.assertIn("test.render_chunk_size=10", overrides)
         self.assertIn("model.encoder.evidence_fusion_type=mean", overrides)
-        self.assertIn("model.encoder.voxel_resolution_scale=2.8", overrides)
+        self.assertIn("model.encoder.voxel_resolution_scale=3.0", overrides)
         self.assertIn("model.encoder.gaussians_per_voxel=1", overrides)
         self.assertIn("model.encoder.scene_field_encoder_size=small", overrides)
         self.assertNotIn("model.encoder.cube_merge_type=mean", overrides)
@@ -134,6 +134,18 @@ class EvaluationScriptTest(unittest.TestCase):
         self.assertTrue(args.chunked_view_forward)
         self.assertTrue(args.use_grouped_scene_features)
         self.assertTrue(args.grouped_depth_estimation)
+
+    def test_output_latent_scene_override(self):
+        evaluation = load_evaluation_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            write_index(repo_root)
+            args = evaluation.parse_args(["--output-latent-scene"])
+            overrides = evaluation.build_overrides(args, repo_root)
+
+        self.assertTrue(args.output_latent_scene)
+        self.assertIn("test.output_latent_scene=true", overrides)
 
 
 if __name__ == "__main__":

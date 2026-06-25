@@ -81,6 +81,7 @@ test:
   save_depth_npy: false
   save_depth_concat_img: false
   save_gaussian: false
+  output_latent_scene: false
   render_chunk_size: null
   stablize_camera: false
   stab_camera_kernel: 50

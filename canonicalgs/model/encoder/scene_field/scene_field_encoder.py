@@ -176,7 +176,8 @@ class SceneFieldEncoder(Swin3DUNet):
                 vggt_meta=False,
                 conf=None,
                 random_scale=False,
-                return_selected_ind=False):
+                return_selected_ind=False,
+                return_latent_scene=False):
         '''
         imgs: context images, shape: BxVxCxHxW, range: [0, 1]
         depth: depth map, shape: BxVxHxW
@@ -231,17 +232,21 @@ class SceneFieldEncoder(Swin3DUNet):
         # s4: decode
 
         sp, coords_sp = self.decode(sp_stack, coords_sp_stack)
-        spf = self.gp_decoder_head(sp.F)  # [N, KxC]
+        latent_scene = sp.F
+        spf = self.gp_decoder_head(latent_scene)  # [N, KxC]
         sp = assign_feats(sp, spf)
         nog_pb = [(self.gpv*sp.C[:,0]==i).sum() for i in range(b)]
         # nog_pv = self.gpv*sp.C.shape[0]//(b * v)
         nog_min = nog_min // b
 
+        output = (sp, scene_lattice.coords_sp, scene_lattice, None, nog_pb, nog_min)
         if return_perview:
-            return sp, coords_sp, scene_lattice, scene_lattice_perview, nog_pb, nog_min
-        if return_selected_ind:
-            return sp, scene_lattice.coords_sp, scene_lattice, scene_lattice_perview, nog_pb, nog_min
-        return sp, scene_lattice.coords_sp, scene_lattice, None, nog_pb, nog_min
+            output = (sp, coords_sp, scene_lattice, scene_lattice_perview, nog_pb, nog_min)
+        elif return_selected_ind:
+            output = (sp, scene_lattice.coords_sp, scene_lattice, scene_lattice_perview, nog_pb, nog_min)
+        if return_latent_scene:
+            output = (*output, latent_scene)
+        return output
 
     '''
     coords: Nx3
@@ -455,7 +460,8 @@ class SceneFieldEncoder(Swin3DUNet):
                 vggt_meta=False,
                 conf=None,
                 random_scale=False,
-                anchor_base=4):
+                anchor_base=4,
+                return_latent_scene=False):
         '''
         imgs: context images, shape: BxVxCxHxW, range: [0, 1]
         depth: depth map, shape: BxVxHxW
@@ -498,15 +504,19 @@ class SceneFieldEncoder(Swin3DUNet):
         # s4: decode
 
         sp, coords_sp = self.decode(sp_stack, coords_sp_stack)
-        spf = self.gp_decoder_head(sp.F)  # [N, KxC]
+        latent_scene = sp.F
+        spf = self.gp_decoder_head(latent_scene)  # [N, KxC]
         sp = assign_feats(sp, spf)
         nog_pb = [(self.gpv*sp.C[:,0]==i).sum() for i in range(b)]
         # nog_pv = self.gpv*sp.C.shape[0]//(b * v)
         nog_min = nog_min // b
 
+        output = (sp, scene_lattice.coords_sp, scene_lattice, None, nog_pb, nog_min)
         if return_perview:
-            return sp, coords_sp, scene_lattice, scene_lattice_perview, nog_pb, nog_min
-        return sp, scene_lattice.coords_sp, scene_lattice, None, nog_pb, nog_min
+            output = (sp, coords_sp, scene_lattice, scene_lattice_perview, nog_pb, nog_min)
+        if return_latent_scene:
+            output = (*output, latent_scene)
+        return output
     def extensible_voxelization(self, xyz_world, feats, imgs, num_depth, b=None, v=None, h=None, w=None, conf=None,return_perview=False, anchor_base=4):
         '''
         compared with plain voxelization, this function can handle unknown input number of views

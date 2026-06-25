@@ -1,8 +1,5 @@
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal, Optional, List
-import os
-
 import torch
 from jaxtyping import Float
 from torch import Tensor, nn
@@ -128,7 +125,7 @@ class GaussianSpaceMerger(nn.Module):
         means_min, mean_max = means.min(), means.max()
         means_normlized = (means - means_min) / (mean_max - means_min + 1e-6)
         voxel_num = int((mean_max - means_min) / self.voxel_size) + 1
-        voxel_num = min(voxel_num, 1000) 
+        voxel_num = min(voxel_num, 1000)
         voxel_indices = torch.clamp((means_normlized * voxel_num).long(), 0, voxel_num - 1)
         # voxel_indicies_2 = voxel_indices[..., 0] * voxel_num * voxel_num + voxel_indices[..., 1] * voxel_num + voxel_indices[..., 2]
         max_len = 1
@@ -140,7 +137,7 @@ class GaussianSpaceMerger(nn.Module):
             score_b = scores[batch_idx]
             ind_b = voxel_indices[batch_idx]
             unique_ind_b,inverse_ind = torch.unique(ind_b,
-                                                    dim=0, 
+                                                    dim=0,
                                                     return_inverse=True,)
             means_b = means[batch_idx]
             covariances_b = covariances[batch_idx]
@@ -191,10 +188,10 @@ class GaussianScorer(nn.Module):
         # s1: voxelization
         x = self.scorer(x)
         return x
-    
+
 class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
-    def __init__(self, 
-                 cfg: EncoderCanonicalGSCfg, 
+    def __init__(self,
+                 cfg: EncoderCanonicalGSCfg,
                  use_scene_field: bool = False,
                  vggt_meta:bool = False,
                  knn_down:bool=False,
@@ -202,7 +199,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
         super().__init__(cfg)
 
         self.vggt_meta = vggt_meta
-        
+
 
         self.depth_predictor = MultiViewUniMatch(
             num_scales=cfg.num_scales,
@@ -231,7 +228,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                                         num_scales=cfg.num_scales,
                                         )
         feature_upsampler_channels = model_configs[cfg.monodepth_vit_type]["features"]
-        
+
         # gaussians adapter
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
 
@@ -269,7 +266,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             nn.init.zeros_(self.gaussian_head[-1].bias[10:])
 
 
-        # anysplat merge 
+        # anysplat merge
         self.gaussian_merge = gaussian_merge
         if self.gaussian_merge:
             self.gaussian_merger = GaussianSpaceMerger(num_gaussian_parameters, num_gaussian_parameters)
@@ -323,7 +320,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             self.dense_gaussian_adapter = DenseGaussianAdapter(cfg.gaussian_adapter)
             self.gpv=self.cfg.gaussians_per_voxel
 
-        
+
     def forward(
         self,
         context: dict,
@@ -448,9 +445,9 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             '''
             the scene_lattice maintains the initialized world coordinates information, e.g., coordinates, rgbs, cell_sizes, xyz_min, xyz_max
             '''
-            scene_field,coords_sp_input, scene_lattice, scene_lattice_perview, nog_pb, nog_min = self.scene_field_encoder(context["image"], depth, 
-                                            rearrange(out, "(b v) c h w -> b v c h w", b=b, v=v), 
-                                            extrinsics = context["extrinsics"], 
+            scene_field,coords_sp_input, scene_lattice, scene_lattice_perview, nog_pb, nog_min = self.scene_field_encoder(context["image"], depth,
+                                            rearrange(out, "(b v) c h w -> b v c h w", b=b, v=v),
+                                            extrinsics = context["extrinsics"],
                                             intrinsics=context["intrinsics"],
                                             depth_min = context["near"][0,0],
                                             depth_max = context["far"][0,0],
@@ -474,7 +471,6 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             if return_selected_ind and visualization_dump is not None:
                 visualization_dump["selected_ind"] = scene_lattice_perview
                 visualization_dump['cell_sizes'] = scene_lattice.cell_sizes
-            
 
             scene_feature = rearrange(scene_field.F, "n (c gpv) -> n c gpv", gpv=self.gpv)
             scene_reliability = scene_feature[:, :1].sigmoid()
@@ -489,11 +485,11 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 selected_ind = torch.where(scene_field.C[:,0] == batch_idx)[0]
                 offset[selected_ind] = (offset_xyz[selected_ind]-0.5) * (voxel_size[batch_idx:batch_idx+1].unsqueeze(-1))
                 xyz_tmp[selected_ind] = (xyz[selected_ind] + 0.5)* voxel_size[batch_idx] + scene_lattice.xyz_min[batch_idx]
-            coords_xyz = rearrange(xyz_tmp,"n c -> n c ()") + offset 
+            coords_xyz = rearrange(xyz_tmp,"n c -> n c ()") + offset
             rgbs = scene_lattice.retrieve_rgb_from_batch_coords(scene_field.C)
 
             scene_field = assign_feats(scene_field,scene_field.F[:,4*self.gpv:])
-            
+
             '''
             It is noted that rgbs only exists where the context image is available, otherwise zeros are used.
             '''
@@ -532,7 +528,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 "nog_min": nog_min,
                 }
             return gp_primitives
-        else:    
+        else:
             gaussians = self.gaussian_head(out)  # [BV, C, H, W]
             gaussians = rearrange(gaussians, "(b v) c h w -> b v c h w", b=b, v=v)
             if self.gaussian_merge:
@@ -553,7 +549,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 # [B, V, H*W, 1, 1]
                 intermediate_depths = torch.cat(
                     depth_preds[:(num_depths - 1)], dim=0)
-                
+
                 intermediate_depths = rearrange(
                     intermediate_depths, "b v h w -> b v (h w) () ()")
 
@@ -570,7 +566,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             # [B, V, H*W, 1, 1]
             opacities = raw_gaussians[..., :1].sigmoid().unsqueeze(-1)
             raw_gaussians = raw_gaussians[..., 1:]
-            
+
             # Convert the features and depths into Gaussians.
             if self.vggt_meta:
                 _, xy_ray = sample_image_grid((h, w), device)
@@ -583,7 +579,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 srf=self.cfg.num_surfaces,
             )
             offset_xy = gaussians[..., :2].sigmoid()
-            
+
             pixel_size = 1 / \
                 torch.tensor((w, h), dtype=torch.float32, device=device)
             if self.vggt_meta:
@@ -677,7 +673,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             if self.gaussian_merge:
                 gaussians = self.gaussian_merger(gaussian_scores, gaussians)
 
-            
+
             if self.cfg.return_depth:
                 # return depth prediction for supervision
                 depths = rearrange(
@@ -706,7 +702,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
     @property
     def sampler(self):
         return None
-    
+
 
     def anchor_forward(
         self,
@@ -722,6 +718,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
         disorder:bool=False,
         noise_ratio:float=0.0,
         scene=None,
+        output_latent_scene: bool = False,
     ):
         device = context["image"].device
         b, v, _, h, w = context["image"].shape
@@ -752,7 +749,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             n_chunk = v//depth_group_size
             result_dict_all = []
             contexts_new = {}
-            for n in range(n_chunk):       
+            for n in range(n_chunk):
                 context_tmp = {}
                 for key in context.keys():
                     # context_tmp[key] = context[key][:, n*depth_group_size:(n+1)*depth_group_size]
@@ -796,11 +793,11 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
 
             for k,value in results_dict.items():
                 results_dict[k] = [torch.cat(vv, dim=0) for vv in value]  # concat in the view dim
-            
+
             # modify context accordingly
             for key in contexts_new.keys():
                 context[key] = torch.cat(contexts_new[key], dim=1)
-        
+
         # list of [B, V, H, W], with all the intermediate depths
         depth_preds = results_dict['depth_preds']
 
@@ -872,44 +869,42 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                     match_prob]
 
         out = torch.cat(concat, dim=1)
-        nv = context["image"].shape[1]
-        if os.environ.get("CANONICALGS_SAVE_SEM_SEG_FEATURES") == "1":
-            feature_dir = Path(f"sem_seg/canonicalgs_input_features_{nv}v")
-            feature_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(rearrange(out, 'v c h w -> (v h w) c'), feature_dir / f"{scene}_features.pt")
         depths = rearrange(depth, "b v h w -> b v (h w) () ()")
         if self.use_scene_field:
             '''
             the scene_lattice maintains the initialized world coordinates information, e.g., coordinates, rgbs, cell_sizes, xyz_min, xyz_max
             '''
             if use_grouped_scene_features:
-                scene_field,coords_sp_input, scene_lattice, scene_lattice_perview, nog_pb, nog_min = self.scene_field_encoder.anchor_forward(context["image"], depth, 
-                                            rearrange(out, "(b v) c h w -> b v c h w", b=b, v=v), 
-                                            extrinsics = context["extrinsics"], 
+                scene_field_outputs = self.scene_field_encoder.anchor_forward(context["image"], depth,
+                                            rearrange(out, "(b v) c h w -> b v c h w", b=b, v=v),
+                                            extrinsics = context["extrinsics"],
                                             intrinsics=context["intrinsics"],
                                             depth_min = context["near"][0,0],
                                             depth_max = context["far"][0,0],
                                             num_depth=128,
                                             return_perview=False,
                                             conf = match_prob,
-                                            random_scale=False, anchor_base=aggregation_group_size)
+                                            random_scale=False, anchor_base=aggregation_group_size,
+                                            return_latent_scene=output_latent_scene)
             else:
-                scene_field,coords_sp_input, scene_lattice, scene_lattice_perview, nog_pb, nog_min = self.scene_field_encoder(context["image"], depth, 
-                                                rearrange(out, "(b v) c h w -> b v c h w", b=b, v=v), 
-                                                extrinsics = context["extrinsics"], 
+                scene_field_outputs = self.scene_field_encoder(context["image"], depth,
+                                                rearrange(out, "(b v) c h w -> b v c h w", b=b, v=v),
+                                                extrinsics = context["extrinsics"],
                                                 intrinsics=context["intrinsics"],
                                                 depth_min = context["near"][0,0],
                                                 depth_max = context["far"][0,0],
                                                 num_depth=128,
                                                 return_perview=False,
                                                 conf = match_prob,
-                                                random_scale=False)
-            
-            nv = context["image"].shape[1]
-            if os.environ.get("CANONICALGS_SAVE_SEM_SEG_FEATURES") == "1":
-                input_feature_dir = Path(f"sem_seg/input_features_{nv}v")
-                input_feature_dir.mkdir(parents=True, exist_ok=True)
-                torch.save(scene_lattice.sp.F, input_feature_dir / f"{scene}_features.pt")
+                                                random_scale=False,
+                                                return_latent_scene=output_latent_scene)
+
+            latent_scene = None
+            if output_latent_scene:
+                scene_field, coords_sp_input, scene_lattice, scene_lattice_perview, nog_pb, nog_min, latent_scene = scene_field_outputs
+            else:
+                scene_field, coords_sp_input, scene_lattice, scene_lattice_perview, nog_pb, nog_min = scene_field_outputs
+
             scene_feature = rearrange(scene_field.F, "n (c gpv) -> n c gpv", gpv=self.gpv)
             scene_reliability = scene_feature[:, :1].sigmoid()
             offset_xyz = scene_feature[:, 1:4].sigmoid()
@@ -926,11 +921,11 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 offset[selected_ind] = (offset_xyz[selected_ind]-0.5) * (voxel_size[batch_idx:batch_idx+1].unsqueeze(-1))
                 xyz_tmp[selected_ind] = (xyz[selected_ind] + 0.5)* voxel_size[batch_idx] + scene_lattice.xyz_min[batch_idx]
                 # xyz_tmp[selected_ind] = xyz[selected_ind]* voxel_size[batch_idx] + scene_lattice.xyz_min[batch_idx]
-            coords_xyz = rearrange(xyz_tmp,"n c -> n c ()") + offset 
+            coords_xyz = rearrange(xyz_tmp,"n c -> n c ()") + offset
             rgbs = scene_lattice.retrieve_rgb_from_batch_coords(scene_field.C)
 
             scene_field = assign_feats(scene_field,scene_field.F[:,4*self.gpv:])
-            
+
             '''
             It is noted that rgbs only exists when context image is available, otherwise as zeros.
             '''
@@ -962,14 +957,20 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                     depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w
                 ).squeeze(-1).squeeze(-1)
 
-                return {
-                "gaussians": gp_primitives,
-                "depths": depths,
-                "nog_pb": nog_pb,
-                "nog_min": nog_min,
+                output = {
+                    "gaussians": gp_primitives,
+                    "depths": depths,
+                    "nog_pb": nog_pb,
+                    "nog_min": nog_min,
                 }
+                if output_latent_scene:
+                    output["latent_scene"] = latent_scene
+                    output["latent_scene_coords"] = scene_field.C
+                    output["scene_lattice_xyz_min"] = scene_lattice.xyz_min
+                    output["scene_lattice_cell_sizes"] = scene_lattice.cell_sizes
+                return output
             return gp_primitives
-        else:    
+        else:
             # torch.save(out, 'notes/canonicalgs_feat.pth')
             gaussians = self.gaussian_head(out)  # [BV, C, H, W]
             gaussians = rearrange(gaussians, "(b v) c h w -> b v c h w", b=b, v=v)
@@ -991,7 +992,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 # [B, V, H*W, 1, 1]
                 intermediate_depths = torch.cat(
                     depth_preds[:(num_depths - 1)], dim=0)
-                
+
                 intermediate_depths = rearrange(
                     intermediate_depths, "b v h w -> b v (h w) () ()")
 
@@ -1008,7 +1009,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             # [B, V, H*W, 1, 1]
             opacities = raw_gaussians[..., :1].sigmoid().unsqueeze(-1)
             raw_gaussians = raw_gaussians[..., 1:]
-            
+
             # Convert the features and depths into Gaussians.
             if self.vggt_meta:
                 _, xy_ray = sample_image_grid((h, w), device)
@@ -1021,7 +1022,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 srf=self.cfg.num_surfaces,
             )
             offset_xy = gaussians[..., :2].sigmoid()
-            
+
             pixel_size = 1 / \
                 torch.tensor((w, h), dtype=torch.float32, device=device)
             if self.vggt_meta:
@@ -1115,7 +1116,7 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             if self.gaussian_merge:
                 gaussians = self.gaussian_merger(gaussian_scores, gaussians)
 
-            
+
             if self.cfg.return_depth:
                 # return depth prediction for supervision
                 depths = rearrange(

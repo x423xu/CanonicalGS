@@ -54,6 +54,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--save-gt-image", action="store_true")
     parser.add_argument("--save-video", action="store_true")
     parser.add_argument("--save-gaussian", action="store_true")
+    parser.add_argument("--output-latent-scene", action="store_true")
     parser.add_argument("--save-depth", action="store_true")
     parser.add_argument("--save-input-images", action="store_true")
     parser.add_argument("--no-strict-load", action="store_true")
@@ -123,6 +124,7 @@ def build_overrides(args: argparse.Namespace, repo_root: Path) -> list[str]:
         f"test.save_gt_image={_bool(args.save_gt_image)}",
         f"test.save_video={_bool(args.save_video)}",
         f"test.save_gaussian={_bool(args.save_gaussian)}",
+        f"test.output_latent_scene={_bool(args.output_latent_scene)}",
         f"test.save_depth={_bool(args.save_depth)}",
         f"test.save_input_images={_bool(args.save_input_images)}",
         f"test.render_chunk_size={args.render_chunk_size}",

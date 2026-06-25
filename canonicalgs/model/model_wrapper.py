@@ -57,6 +57,55 @@ from .types import Gaussians
 DEBUG = False
 NOISE=True
 
+def _detach_first(value):
+    if torch.is_tensor(value):
+        if value.ndim > 0 and value.shape[0] > 0:
+            value = value[0]
+        return value.detach().cpu()
+    return value
+
+
+def save_latent_scene_package(
+    output_dir: Path,
+    scene: str,
+    latent_scene: Tensor,
+    coords: Tensor,
+    scene_lattice_xyz_min: Tensor,
+    scene_lattice_cell_sizes: Tensor,
+    context: dict,
+    target: dict,
+) -> Path:
+    latent_scene_dir = Path(output_dir) / "latent_scene" / scene
+    latent_scene_dir.mkdir(parents=True, exist_ok=True)
+    output_path = latent_scene_dir / "latent_scene.pt"
+    payload = {
+        "scene": scene,
+        "latent_scene": latent_scene.detach().cpu(),
+        "coords": coords.detach().cpu(),
+        "scene_lattice": {
+            "xyz_min": scene_lattice_xyz_min.detach().cpu(),
+            "cell_sizes": scene_lattice_cell_sizes.detach().cpu(),
+        },
+        "image_shape": tuple(context["image"].shape[-2:]),
+        "context": {
+            "extrinsics": _detach_first(context["extrinsics"]),
+            "intrinsics": _detach_first(context["intrinsics"]),
+            "near": _detach_first(context["near"]),
+            "far": _detach_first(context["far"]),
+            "index": _detach_first(context.get("index")),
+        },
+        "target": {
+            "extrinsics": _detach_first(target["extrinsics"]),
+            "intrinsics": _detach_first(target["intrinsics"]),
+            "near": _detach_first(target["near"]),
+            "far": _detach_first(target["far"]),
+            "index": _detach_first(target.get("index")),
+        },
+    }
+    torch.save(payload, output_path)
+    return output_path
+
+
 @dataclass
 class OptimizerCfg:
     lr: float
@@ -86,6 +135,7 @@ class TestCfg:
     save_depth_concat_img: bool
     save_depth_npy: bool
     save_gaussian: bool
+    output_latent_scene: bool
     render_chunk_size: int | None
     stablize_camera: bool
     stab_camera_kernel: int
@@ -573,6 +623,7 @@ class ModelWrapper(LightningModule):
             use_grouped_scene_features=self.use_grouped_scene_features,
             aggregation_group_size=self.aggregation_group_size,
             noise_ratio=self.noise_ratio,
+            output_latent_scene=self.test_cfg.output_latent_scene,
             scene=scene
         )
         return gaussians
@@ -622,9 +673,6 @@ class ModelWrapper(LightningModule):
             visualization_dump = None
 
         # Render Gaussians.
-        nv = batch['context']['extrinsics'].shape[1]
-        if not os.path.exists('sem_seg/canonicalgs_input_features_{}v'.format(nv)):
-            os.makedirs('sem_seg/canonicalgs_input_features_{}v'.format(nv))
         with self.benchmarker.time("encoder"):
             # batch["context"]["extrinsics"] = batch["context"]["extrinsics"] + 0.01*torch.rand_like(batch["context"]["extrinsics"])
             gaussians = self._chunked_view_forward(batch['context'], visualization_dump=visualization_dump, scene=scene)
@@ -646,6 +694,17 @@ class ModelWrapper(LightningModule):
 
             if isinstance(gaussians, dict):
                 pred_depths = gaussians["depths"]
+                if self.test_cfg.output_latent_scene:
+                    save_latent_scene_package(
+                        Path(get_cfg()["output_dir"]),
+                        scene,
+                        gaussians["latent_scene"],
+                        gaussians["latent_scene_coords"],
+                        gaussians["scene_lattice_xyz_min"],
+                        gaussians["scene_lattice_cell_sizes"],
+                        batch["context"],
+                        batch["target"],
+                    )
                 if "depth" in batch["context"]:
                     depth_gt = batch["context"]["depth"]         
                 gaussians = gaussians["gaussians"]
@@ -663,24 +722,6 @@ class ModelWrapper(LightningModule):
         #     visualization_dump["cube_scales"] = visualization_dump["cube_scales"][:,selected_ind]
         #     visualization_dump["cube_rotations"] = visualization_dump["cube_rotations"][:,selected_ind]
 
-        # Optional semantic-segmentation feature dump for offline analysis.
-        if os.environ.get("CANONICALGS_SAVE_SEM_SEG_FEATURES") == "1":
-            feature_dir = Path(f"sem_seg/canonicalgs_input_features_{nv}v")
-            feature_dir.mkdir(parents=True, exist_ok=True)
-            feature_splat_meta = {
-                'extrinsics': batch['target']['extrinsics'][0].detach().cpu(),
-                'intrinsics': batch['target']['intrinsics'][0].detach().cpu(),
-                "image_shape": (256,256),
-                'near': batch['target']['near'][0].detach().cpu(),
-                'far': batch['target']['far'][0].detach().cpu(),
-            }
-            torch.save(feature_splat_meta, feature_dir / f"{scene}_meta.pt")
-            save_gaussians = {
-                'means': gaussians.means[0].detach().cpu(),
-                'covariances': gaussians.covariances[0].detach().cpu(),
-                'opacities': gaussians.opacities[0].detach().cpu(),
-            }
-            torch.save(save_gaussians, feature_dir / f"{scene}_gaussians.pt")
         if self.test_cfg.save_gaussian: 
             if self.use_scene_field:
                 scene = batch["scene"][0]
