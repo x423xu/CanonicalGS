@@ -177,6 +177,15 @@ new = """        bias=False,
 if old in text:
     text = text.replace(old, new, 1)
 path.write_text(text)
+
+path = root / "Swin3D/sparse_dl/attn/attn_coff.py"
+text = path.read_text()
+text = text.replace(
+    "norm_attn_feats = raw_attn_feats / sum_coffs",
+    "norm_attn_feats = raw_attn_feats / torch.clamp(sum_coffs, min=1e-6)",
+    1,
+)
+path.write_text(text)
 PY
 }
 
