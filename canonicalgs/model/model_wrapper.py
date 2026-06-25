@@ -656,22 +656,24 @@ class ModelWrapper(LightningModule):
         #     visualization_dump["cube_scales"] = visualization_dump["cube_scales"][:,selected_ind]
         #     visualization_dump["cube_rotations"] = visualization_dump["cube_rotations"][:,selected_ind]
 
-        # save gaussians
-        
-        feature_splat_meta = {
-            'extrinsics': batch['target']['extrinsics'][0].detach().cpu(),
-            'intrinsics': batch['target']['intrinsics'][0].detach().cpu(),
-            "image_shape": (256,256),
-            'near': batch['target']['near'][0].detach().cpu(),
-            'far': batch['target']['far'][0].detach().cpu(),
-        }
-        torch.save(feature_splat_meta,'sem_seg/canonicalgs_input_features_{}v/{}_meta.pt'.format(nv,scene))
-        save_gaussians = {
-            'means': gaussians.means[0].detach().cpu(),
-            'covariances': gaussians.covariances[0].detach().cpu(),
-            'opacities': gaussians.opacities[0].detach().cpu(),
-        }
-        torch.save(save_gaussians, 'sem_seg/canonicalgs_input_features_{}v/{}_gaussians.pt'.format(nv,scene))
+        # Optional semantic-segmentation feature dump for offline analysis.
+        if os.environ.get("CANONICALGS_SAVE_SEM_SEG_FEATURES") == "1":
+            feature_dir = Path(f"sem_seg/canonicalgs_input_features_{nv}v")
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            feature_splat_meta = {
+                'extrinsics': batch['target']['extrinsics'][0].detach().cpu(),
+                'intrinsics': batch['target']['intrinsics'][0].detach().cpu(),
+                "image_shape": (256,256),
+                'near': batch['target']['near'][0].detach().cpu(),
+                'far': batch['target']['far'][0].detach().cpu(),
+            }
+            torch.save(feature_splat_meta, feature_dir / f"{scene}_meta.pt")
+            save_gaussians = {
+                'means': gaussians.means[0].detach().cpu(),
+                'covariances': gaussians.covariances[0].detach().cpu(),
+                'opacities': gaussians.opacities[0].detach().cpu(),
+            }
+            torch.save(save_gaussians, feature_dir / f"{scene}_gaussians.pt")
         if self.test_cfg.save_gaussian: 
             if self.gs_cube:
                 scene = batch["scene"][0]
