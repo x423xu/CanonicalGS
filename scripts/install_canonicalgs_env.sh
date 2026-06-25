@@ -94,99 +94,21 @@ export CXX="$CANONICALGS_CXX"
 export LIBRARY_PATH="$CANONICALGS_ENV_PREFIX/lib:${LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="$CANONICALGS_ENV_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
-apply_swin3d_patch() {
-  "$PYTHON" - "$REPO_ROOT/third_party/Swin3D" <<'PY'
-from pathlib import Path
-import sys
+validate_swin3d_submodule() {
+  local swin3d_root="$REPO_ROOT/third_party/Swin3D/Swin3D"
+  local missing=0
 
-root = Path(sys.argv[1])
+  grep -q "other_down_stride=2" "$swin3d_root/models/Swin3D.py" || missing=1
+  grep -q "stem_norm='bn'" "$swin3d_root/models/Swin3D.py" || missing=1
+  grep -q "norm=stem_norm" "$swin3d_root/models/Swin3D.py" || missing=1
+  grep -q "norm='bn'" "$swin3d_root/modules/mink_layers.py" || missing=1
+  grep -q "MinkowskiInstanceNorm" "$swin3d_root/modules/mink_layers.py" || missing=1
+  grep -q "torch.clamp(sum_coffs, min=1e-6)" "$swin3d_root/sparse_dl/attn/attn_coff.py" || missing=1
 
-path = root / "Swin3D/models/Swin3D.py"
-text = path.read_text()
-text = text.replace(
-    "num_layers=5, num_classes=13, stem_transformer=True, first_down_stride=2, upsample='linear', knn_down=True, \\\n            in_channels=6, cRSE='XYZ_RGB', fp16_mode=0):",
-    "num_layers=5, num_classes=13, stem_transformer=True, first_down_stride=2, other_down_stride=2, upsample='linear', knn_down=True, \\\n            in_channels=6, cRSE='XYZ_RGB', fp16_mode=0, stem_norm='bn'):",
-)
-if "norm=stem_norm" not in text:
-    text = text.replace(
-        "                    kernel_size=3,\n                    stride=1,\n                )",
-        "                    kernel_size=3,\n                    stride=1,\n                    norm=stem_norm,\n                )",
-        1,
-    )
-text = text.replace(
-    "down_stride=first_down_stride if i==0 else 2,",
-    "down_stride=first_down_stride if i==0 else other_down_stride,",
-    1,
-)
-path.write_text(text)
-
-path = root / "Swin3D/modules/mink_layers.py"
-text = path.read_text()
-old = """        bias=False,
-        dimension=3,
-    ):
-        super().__init__()
-        self.conv_layers = nn.Sequential(
-            ME.MinkowskiConvolution(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                dilation=dilation,
-                bias=bias,
-                dimension=dimension,
-            ),
-            ME.MinkowskiBatchNorm(out_channels),
-            ME.MinkowskiReLU(inplace=True),
-        )
-"""
-new = """        bias=False,
-        dimension=3,
-        norm='bn'
-    ):
-        super().__init__()
-        if norm=='bn':
-            self.conv_layers = nn.Sequential(
-                ME.MinkowskiConvolution(
-                    in_channels=in_channels,
-                    out_channels=out_channels,
-                    kernel_size=kernel_size,
-                    stride=stride,
-                    dilation=dilation,
-                    bias=bias,
-                    dimension=dimension,
-                ),
-                ME.MinkowskiBatchNorm(out_channels),
-                ME.MinkowskiReLU(inplace=True),
-            )
-        elif norm=='in':
-            self.conv_layers = nn.Sequential(
-                ME.MinkowskiConvolution(
-                    in_channels=in_channels,
-                    out_channels=out_channels,
-                    kernel_size=kernel_size,
-                    stride=stride,
-                    dilation=dilation,
-                    bias=bias,
-                    dimension=dimension,
-                ),
-                ME.MinkowskiInstanceNorm(out_channels),
-                ME.MinkowskiReLU(inplace=True),
-            )
-"""
-if old in text:
-    text = text.replace(old, new, 1)
-path.write_text(text)
-
-path = root / "Swin3D/sparse_dl/attn/attn_coff.py"
-text = path.read_text()
-text = text.replace(
-    "norm_attn_feats = raw_attn_feats / sum_coffs",
-    "norm_attn_feats = raw_attn_feats / torch.clamp(sum_coffs, min=1e-6)",
-    1,
-)
-path.write_text(text)
-PY
+  if [[ "$missing" -ne 0 ]]; then
+    echo "Swin3D submodule is missing CanonicalGS fixes. Run: git submodule update --init --recursive third_party/Swin3D" >&2
+    exit 1
+  fi
 }
 
 
@@ -275,7 +197,7 @@ rm -f "$REQ_WITHOUT_LOCAL_BUILD"
 # MinkowskiEngine is required by Swin3D and CanonicalGS. Build it from source
 # inside this conda environment; no existing environment or system toolkit is copied.
 install_minkowski_engine
-apply_swin3d_patch
+validate_swin3d_submodule
 
 "${PIP[@]}" install -e "$REPO_ROOT"
 (
