@@ -16,7 +16,7 @@ from ...geometry.projection import sample_image_grid
 from ..types import Gaussians
 from .common.gaussian_adapter import GaussianAdapter, GaussianAdapterCfg, GaussianCubeAdapter, DenseGaussianAdapter
 from .encoder import Encoder
-from .gs_cube import GSCubeEncoder
+from .scene_field import SceneFieldEncoder
 from .visualization.encoder_visualizer_canonicalgs_cfg import EncoderVisualizerCanonicalGSCfg
 
 import torchvision.transforms as T
@@ -79,12 +79,37 @@ class EncoderCanonicalGSCfg:
     # multi-view matching
     local_mv_match: int
 
-    gaussians_per_cell: int
     down_strides: List[int]
-    cell_scale: float
-    cube_encoder_type: str  # small, base, large
-    cube_merge_type: str
-    stem_norm:str
+    stem_norm: str
+    gaussians_per_voxel: Optional[int] = None
+    voxel_resolution_scale: Optional[float] = None
+    scene_field_encoder_size: Optional[str] = None  # small, base, large
+    evidence_fusion_type: Optional[str] = None
+    gaussians_per_cell: Optional[int] = None
+    cell_scale: Optional[float] = None
+    cube_encoder_type: Optional[str] = None
+    cube_merge_type: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.gaussians_per_voxel is None:
+            self.gaussians_per_voxel = self.gaussians_per_cell
+        if self.voxel_resolution_scale is None:
+            self.voxel_resolution_scale = self.cell_scale
+        if self.scene_field_encoder_size is None:
+            self.scene_field_encoder_size = self.cube_encoder_type
+        if self.evidence_fusion_type is None:
+            self.evidence_fusion_type = self.cube_merge_type
+        missing = [
+            name for name in (
+                "gaussians_per_voxel",
+                "voxel_resolution_scale",
+                "scene_field_encoder_size",
+                "evidence_fusion_type",
+            )
+            if getattr(self, name) is None
+        ]
+        if missing:
+            raise ValueError(f"Missing CanonicalGS scene-field config value(s): {missing}")
 
 class GaussianSpaceMerger(nn.Module):
     def __init__(self, d_in, d_out, voxel_size = 0.001):
@@ -170,7 +195,7 @@ class GaussianScorer(nn.Module):
 class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
     def __init__(self, 
                  cfg: EncoderCanonicalGSCfg, 
-                 gs_cube:bool = False,
+                 use_scene_field: bool = False,
                  vggt_meta:bool = False,
                  knn_down:bool=False,
                  gaussian_merge:bool=False) -> None:
@@ -258,11 +283,10 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             nn.init.zeros_(self.gaussian_head[-1].weight[3:6])
             nn.init.zeros_(self.gaussian_head[-1].bias[3:6])
 
-        # whether to use the gs cube model
-        self.gs_cube = gs_cube
-        if gs_cube:
+        self.use_scene_field = use_scene_field
+        if use_scene_field:
             down_strides = cfg.down_strides
-            cube_merge_type = cfg.cube_merge_type
+            evidence_fusion_type = cfg.evidence_fusion_type
             stem_norm = cfg.stem_norm
             kwargs = {
                 'large':{
@@ -329,12 +353,12 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                     'num_layers':2
                 }
             }
-            self.gs_cube_encoder = GSCubeEncoder(
-                    depths=kwargs[cfg.cube_encoder_type]['depths'],
-                    channels=kwargs[cfg.cube_encoder_type]['channels'],
-                    num_heads=kwargs[cfg.cube_encoder_type]['num_heads'],
-                    window_sizes=kwargs[cfg.cube_encoder_type]['window_sizes'],
-                    num_layers=kwargs[cfg.cube_encoder_type]['num_layers'],
+            self.scene_field_encoder = SceneFieldEncoder(
+                    depths=kwargs[cfg.scene_field_encoder_size]['depths'],
+                    channels=kwargs[cfg.scene_field_encoder_size]['channels'],
+                    num_heads=kwargs[cfg.scene_field_encoder_size]['num_heads'],
+                    window_sizes=kwargs[cfg.scene_field_encoder_size]['window_sizes'],
+                    num_layers=kwargs[cfg.scene_field_encoder_size]['num_layers'],
                     quant_size=4,
                     in_channels = 132,
                     down_strides=down_strides,
@@ -346,14 +370,14 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                     stem_transformer=True,
                     fp16_mode=0,
                     num_gaussian_parameters = num_gaussian_parameters+1,
-                    gpc = self.cfg.gaussians_per_cell,
-                    cell_scale = self.cfg.cell_scale,
-                    cube_merge_type=cube_merge_type,
+                    gpv=self.cfg.gaussians_per_voxel,
+                    voxel_resolution_scale=self.cfg.voxel_resolution_scale,
+                    evidence_fusion_type=evidence_fusion_type,
                     stem_norm=stem_norm
                 )
 
             self.dense_gaussian_adapter = DenseGaussianAdapter(cfg.gaussian_adapter)
-            self.gpc = self.cfg.gaussians_per_cell
+            self.gpv=self.cfg.gaussians_per_voxel
 
             # use the gs cube model
             # self.gaussian_head_x = nn.Sequential(
@@ -523,14 +547,14 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             end_time_upsampler = time.time()
             print(f"Feature upsampling and regressor time: {end_time_upsampler - start_time_upsampler:.4f} seconds")
             start_time_cube = time.time()
-        if self.gs_cube:
+        if self.use_scene_field:
             '''
-            the input_cube_tensor maintains the initialized world coordinates information, e.g., coordinates, rgbs, cell_sizes, xyz_min, xyz_max
+            the scene_lattice maintains the initialized world coordinates information, e.g., coordinates, rgbs, cell_sizes, xyz_min, xyz_max
             '''
             # depth = depth.detach()
             # depths = depths.detach()
             # out = out.detach()
-            gs_cube,coords_sp_input, input_cube_tensor, input_cube_tensor_perview, nog_pb, nog_min = self.gs_cube_encoder(context["image"], depth, 
+            scene_field,coords_sp_input, scene_lattice, scene_lattice_perview, nog_pb, nog_min = self.scene_field_encoder(context["image"], depth, 
                                             rearrange(out, "(b v) c h w -> b v c h w", b=b, v=v), 
                                             extrinsics = context["extrinsics"], 
                                             intrinsics=context["intrinsics"],
@@ -554,33 +578,33 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 for name, elapsed in percents:
                     print(f"{name}: {elapsed:.4f} seconds, {elapsed/total*100:.2f}%")
             if return_selected_ind and visualization_dump is not None:
-                visualization_dump["selected_ind"] = input_cube_tensor_perview
-                visualization_dump['cell_sizes'] = input_cube_tensor.cell_sizes
-            # torch.save(gs_cube.F, 'notes/gs_cube_F_8.pth')
-            # torch.save(gs_cube.C, 'notes/gs_cube_C_8.pth')
+                visualization_dump["selected_ind"] = scene_lattice_perview
+                visualization_dump['cell_sizes'] = scene_lattice.cell_sizes
+            # torch.save(scene_field.F, 'notes/scene_field_F_8.pth')
+            # torch.save(scene_field.C, 'notes/scene_field_C_8.pth')
             
 
-            cube_feat = rearrange(gs_cube.F, "n (c gpc) -> n c gpc", gpc=self.gpc)
-            cube_opacities = cube_feat[:, :1].sigmoid()
-            offset_xyz = cube_feat[:, 1:4].sigmoid()
-            voxel_size = input_cube_tensor.cell_sizes
-            # xyz = gs_cube.C.type(torch.float32)[:,1:4]
+            scene_feature = rearrange(scene_field.F, "n (c gpv) -> n c gpv", gpv=self.gpv)
+            scene_reliability = scene_feature[:, :1].sigmoid()
+            offset_xyz = scene_feature[:, 1:4].sigmoid()
+            voxel_size = scene_lattice.cell_sizes
+            # xyz = scene_field.C.type(torch.float32)[:,1:4]
             '''Make sure the grad is backpropagated from output opacities to input depth, thus to before encoder'''
-            xyz = gs_cube.C.type(torch.float32)[:,1:4] + coords_sp_input.F[:, 1:4] - coords_sp_input.F[:, 1:4].detach()
-            #xyz = gs_cube.C.type(torch.float32)[:,1:4]
+            xyz = scene_field.C.type(torch.float32)[:,1:4] + coords_sp_input.F[:, 1:4] - coords_sp_input.F[:, 1:4].detach()
+            #xyz = scene_field.C.type(torch.float32)[:,1:4]
 
             if DEBUG:
                 from ...geometry.projection import get_fov, homogenize_points
                 from PIL import Image
                 import numpy as np
 
-                # points = input_cube_tensor.sp.C.clone().type(torch.float32)[:,1:4]
-                points = input_cube_tensor_perview[0][0].sp.C.clone().type(torch.float32)[:,1:4]
-                # selected_ind = torch.where(input_cube_tensor.sp.C[:,0] == 0)[0]
+                # points = scene_lattice.sp.C.clone().type(torch.float32)[:,1:4]
+                points = scene_lattice_perview[0][0].sp.C.clone().type(torch.float32)[:,1:4]
+                # selected_ind = torch.where(scene_lattice.sp.C[:,0] == 0)[0]
                 # points_selected = points[selected_ind]
                 # offset.scatter_(src = (offset_xyz-0.5)* voxel_size[batch_idx],index = selected_ind, dim=0, )
-                points = (points+0.5) * voxel_size[0].unsqueeze(0) + input_cube_tensor_perview[0][0].xyz_min[0]
-                colors = input_cube_tensor_perview[0][0].retrieve_rgb_from_batch_coords(input_cube_tensor_perview[0][0].sp.C)
+                points = (points+0.5) * voxel_size[0].unsqueeze(0) + scene_lattice_perview[0][0].xyz_min[0]
+                colors = scene_lattice_perview[0][0].retrieve_rgb_from_batch_coords(scene_lattice_perview[0][0].sp.C)
                 P = context["extrinsics"][0,0]
                 K = context["intrinsics"][0,0]
                 points_homo = homogenize_points(points)
@@ -607,39 +631,39 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             xyz_tmp = xyz.clone()
             offset = offset_xyz.clone()
             for batch_idx in range(voxel_size.shape[0]):
-                selected_ind = torch.where(gs_cube.C[:,0] == batch_idx)[0]
+                selected_ind = torch.where(scene_field.C[:,0] == batch_idx)[0]
                 offset[selected_ind] = (offset_xyz[selected_ind]-0.5) * (voxel_size[batch_idx:batch_idx+1].unsqueeze(-1))
-                xyz_tmp[selected_ind] = (xyz[selected_ind] + 0.5)* voxel_size[batch_idx] + input_cube_tensor.xyz_min[batch_idx]
-                # xyz_tmp[selected_ind] = xyz[selected_ind]* voxel_size[batch_idx] + input_cube_tensor.xyz_min[batch_idx]
+                xyz_tmp[selected_ind] = (xyz[selected_ind] + 0.5)* voxel_size[batch_idx] + scene_lattice.xyz_min[batch_idx]
+                # xyz_tmp[selected_ind] = xyz[selected_ind]* voxel_size[batch_idx] + scene_lattice.xyz_min[batch_idx]
             coords_xyz = rearrange(xyz_tmp,"n c -> n c ()") + offset 
-            rgbs = input_cube_tensor.retrieve_rgb_from_batch_coords(gs_cube.C)
+            rgbs = scene_lattice.retrieve_rgb_from_batch_coords(scene_field.C)
 
-            gs_cube = assign_feats(gs_cube,gs_cube.F[:,4*self.gpc:])
+            scene_field = assign_feats(scene_field,scene_field.F[:,4*self.gpv:])
             
             '''
             It is noted that rgbs only exists where the context image is available, otherwise zeros are used.
             '''
-            cube_gaussians = self.dense_gaussian_adapter.forward(
+            gp_primitives = self.dense_gaussian_adapter.forward(
                 context["extrinsics"],
                 context["intrinsics"],
                 rearrange(coords_xyz, "n c l -> n l c"),
-                cube_opacities,
-                gs_cube,
+                scene_reliability,
+                scene_field,
                 input_images=rgbs if self.cfg.init_sh_input_img else None,
-                gpc = self.gpc,
+                gpv=self.gpv,
             )
             # Dump visualizations if needed.
             if visualization_dump is not None:
                 visualization_dump["depth"] = rearrange(
                     depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w
                 )
-                visualization_dump["cube_scales"] = cube_gaussians.scales
-                visualization_dump["cube_rotations"] = cube_gaussians.rotations
-            cube_gaussians = Gaussians(
-                cube_gaussians.means,
-                cube_gaussians.covariances,
-                cube_gaussians.harmonics,
-                cube_gaussians.opacities,
+                visualization_dump["cube_scales"] = gp_primitives.scales
+                visualization_dump["cube_rotations"] = gp_primitives.rotations
+            gp_primitives = Gaussians(
+                gp_primitives.means,
+                gp_primitives.covariances,
+                gp_primitives.harmonics,
+                gp_primitives.opacities,
             )
             if self.cfg.return_depth:
                 # return depth prediction for supervision
@@ -648,12 +672,12 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 ).squeeze(-1).squeeze(-1)
 
                 return {
-                "gaussians": cube_gaussians,
+                "gaussians": gp_primitives,
                 "depths": depths,
                 "nog_pb": nog_pb,
                 "nog_min": nog_min,
                 }
-            return cube_gaussians
+            return gp_primitives
         else:    
             gaussians = self.gaussian_head(out)  # [BV, C, H, W]
             gaussians = rearrange(gaussians, "(b v) c h w -> b v c h w", b=b, v=v)
@@ -838,18 +862,18 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
         visualization_dump: Optional[dict] = None,
         scene_names: Optional[list] = None,
         random_scale: bool = False,
-        view_base:int=2,
-        anchor_features:bool=False,
-        anchor_base=4,
+        depth_group_size: int = 2,
+        use_grouped_scene_features: bool = False,
+        aggregation_group_size: int = 4,
         disorder:bool=False,
         noise_ratio:float=0.0,
         scene=None,
     ):
         device = context["image"].device
         b, v, _, h, w = context["image"].shape
-        assert v%view_base==0, f'number of views {v} should be multiple of view_base {view_base}'
-        # do not split depth estimation if v==view_base
-        if v==view_base:
+        assert v%depth_group_size==0, f'number of views {v} should be multiple of depth_group_size {depth_group_size}'
+        # do not split depth estimation if v==depth_group_size
+        if v==depth_group_size:
             if v > 3:
                 with torch.no_grad():
                     xyzs = context["extrinsics"][:, :, :3, -1].detach()
@@ -870,24 +894,24 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 nn_matrix=cameras_dist_index,
             )
         else:
-            # chunk the data to v=view_base
+            # chunk the data to v=depth_group_size
             # hardcoded ind
             # ind1 = [0,4,6,7]
             # ind2 = [1,2,3,5]
-            n_chunk = v//view_base
+            n_chunk = v//depth_group_size
             result_dict_all = []
             contexts_new = {}
             for n in range(n_chunk):       
                 context_tmp = {}
                 for key in context.keys():
-                    # context_tmp[key] = context[key][:, n*view_base:(n+1)*view_base]
+                    # context_tmp[key] = context[key][:, n*depth_group_size:(n+1)*depth_group_size]
                     # context_tmp[key] = context[key][:, ind1 if n%2==0 else ind2]
                     context_tmp[key] = context[key][:, n::n_chunk]
                     if key not in contexts_new.keys():
                         contexts_new[key] = [context_tmp[key]]
                     else:
                         contexts_new[key].append(context_tmp[key])
-                if view_base > 3:
+                if depth_group_size > 3:
                     with torch.no_grad():
                         xyzs = context_tmp["extrinsics"][:, :, :3, -1].detach()
                         cameras_dist_matrix = torch.cdist(xyzs, xyzs, p=2)
@@ -1003,15 +1027,15 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             feature_dir.mkdir(parents=True, exist_ok=True)
             torch.save(rearrange(out, 'v c h w -> (v h w) c'), feature_dir / f"{scene}_features.pt")
         depths = rearrange(depth, "b v h w -> b v (h w) () ()")
-        if self.gs_cube:
+        if self.use_scene_field:
             '''
-            the input_cube_tensor maintains the initialized world coordinates information, e.g., coordinates, rgbs, cell_sizes, xyz_min, xyz_max
+            the scene_lattice maintains the initialized world coordinates information, e.g., coordinates, rgbs, cell_sizes, xyz_min, xyz_max
             '''
             # depth = depth.detach()
             # depths = depths.detach()
             # out = out.detach()
-            if anchor_features:
-                gs_cube,coords_sp_input, input_cube_tensor, input_cube_tensor_perview, nog_pb, nog_min = self.gs_cube_encoder.anchor_forward(context["image"], depth, 
+            if use_grouped_scene_features:
+                scene_field,coords_sp_input, scene_lattice, scene_lattice_perview, nog_pb, nog_min = self.scene_field_encoder.anchor_forward(context["image"], depth, 
                                             rearrange(out, "(b v) c h w -> b v c h w", b=b, v=v), 
                                             extrinsics = context["extrinsics"], 
                                             intrinsics=context["intrinsics"],
@@ -1020,9 +1044,9 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                                             num_depth=128,
                                             return_perview=False,
                                             conf = match_prob,
-                                            random_scale=False, anchor_base=anchor_base)
+                                            random_scale=False, anchor_base=aggregation_group_size)
             else:
-                gs_cube,coords_sp_input, input_cube_tensor, input_cube_tensor_perview, nog_pb, nog_min = self.gs_cube_encoder(context["image"], depth, 
+                scene_field,coords_sp_input, scene_lattice, scene_lattice_perview, nog_pb, nog_min = self.scene_field_encoder(context["image"], depth, 
                                                 rearrange(out, "(b v) c h w -> b v c h w", b=b, v=v), 
                                                 extrinsics = context["extrinsics"], 
                                                 intrinsics=context["intrinsics"],
@@ -1034,34 +1058,34 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                                                 random_scale=False)
             
        
-            # torch.save(gs_cube.F, 'notes/gscube_feats.pth')
-            # torch.save(gs_cube.C, 'notes/gscube_coords.pth')
+            # torch.save(scene_field.F, 'notes/gsscene_features.pth')
+            # torch.save(scene_field.C, 'notes/gscube_coords.pth')
             nv = context["image"].shape[1]
             if os.environ.get("CANONICALGS_SAVE_SEM_SEG_FEATURES") == "1":
                 input_feature_dir = Path(f"sem_seg/input_features_{nv}v")
                 input_feature_dir.mkdir(parents=True, exist_ok=True)
-                torch.save(input_cube_tensor.sp.F, input_feature_dir / f"{scene}_features.pt")
-            cube_feat = rearrange(gs_cube.F, "n (c gpc) -> n c gpc", gpc=self.gpc)
-            cube_opacities = cube_feat[:, :1].sigmoid()
-            offset_xyz = cube_feat[:, 1:4].sigmoid()
-            voxel_size = input_cube_tensor.cell_sizes
-            # xyz = gs_cube.C.type(torch.float32)[:,1:4]
+                torch.save(scene_lattice.sp.F, input_feature_dir / f"{scene}_features.pt")
+            scene_feature = rearrange(scene_field.F, "n (c gpv) -> n c gpv", gpv=self.gpv)
+            scene_reliability = scene_feature[:, :1].sigmoid()
+            offset_xyz = scene_feature[:, 1:4].sigmoid()
+            voxel_size = scene_lattice.cell_sizes
+            # xyz = scene_field.C.type(torch.float32)[:,1:4]
             '''Make sure the grad is backpropagated from output opacities to input depth, thus to front encoder'''
-            xyz = gs_cube.C.type(torch.float32)[:,1:4] + coords_sp_input.F[:, 1:4] - coords_sp_input.F[:, 1:4].detach()
-            #xyz = gs_cube.C.type(torch.float32)[:,1:4]
+            xyz = scene_field.C.type(torch.float32)[:,1:4] + coords_sp_input.F[:, 1:4] - coords_sp_input.F[:, 1:4].detach()
+            #xyz = scene_field.C.type(torch.float32)[:,1:4]
 
             if DEBUG:
                 from ...geometry.projection import get_fov, homogenize_points
                 from PIL import Image
                 import numpy as np
 
-                # points = input_cube_tensor.sp.C.clone().type(torch.float32)[:,1:4]
-                points = input_cube_tensor_perview[0][0].sp.C.clone().type(torch.float32)[:,1:4]
-                # selected_ind = torch.where(input_cube_tensor.sp.C[:,0] == 0)[0]
+                # points = scene_lattice.sp.C.clone().type(torch.float32)[:,1:4]
+                points = scene_lattice_perview[0][0].sp.C.clone().type(torch.float32)[:,1:4]
+                # selected_ind = torch.where(scene_lattice.sp.C[:,0] == 0)[0]
                 # points_selected = points[selected_ind]
                 # offset.scatter_(src = (offset_xyz-0.5)* voxel_size[batch_idx],index = selected_ind, dim=0, )
-                points = (points+0.5) * voxel_size[0].unsqueeze(0) + input_cube_tensor_perview[0][0].xyz_min[0]
-                colors = input_cube_tensor_perview[0][0].retrieve_rgb_from_batch_coords(input_cube_tensor_perview[0][0].sp.C)
+                points = (points+0.5) * voxel_size[0].unsqueeze(0) + scene_lattice_perview[0][0].xyz_min[0]
+                colors = scene_lattice_perview[0][0].retrieve_rgb_from_batch_coords(scene_lattice_perview[0][0].sp.C)
                 P = context["extrinsics"][0,0]
                 K = context["intrinsics"][0,0]
                 points_homo = homogenize_points(points)
@@ -1088,39 +1112,39 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
             xyz_tmp = xyz.clone()
             offset = offset_xyz.clone()
             for batch_idx in range(voxel_size.shape[0]):
-                selected_ind = torch.where(gs_cube.C[:,0] == batch_idx)[0]
+                selected_ind = torch.where(scene_field.C[:,0] == batch_idx)[0]
                 offset[selected_ind] = (offset_xyz[selected_ind]-0.5) * (voxel_size[batch_idx:batch_idx+1].unsqueeze(-1))
-                xyz_tmp[selected_ind] = (xyz[selected_ind] + 0.5)* voxel_size[batch_idx] + input_cube_tensor.xyz_min[batch_idx]
-                # xyz_tmp[selected_ind] = xyz[selected_ind]* voxel_size[batch_idx] + input_cube_tensor.xyz_min[batch_idx]
+                xyz_tmp[selected_ind] = (xyz[selected_ind] + 0.5)* voxel_size[batch_idx] + scene_lattice.xyz_min[batch_idx]
+                # xyz_tmp[selected_ind] = xyz[selected_ind]* voxel_size[batch_idx] + scene_lattice.xyz_min[batch_idx]
             coords_xyz = rearrange(xyz_tmp,"n c -> n c ()") + offset 
-            rgbs = input_cube_tensor.retrieve_rgb_from_batch_coords(gs_cube.C)
+            rgbs = scene_lattice.retrieve_rgb_from_batch_coords(scene_field.C)
 
-            gs_cube = assign_feats(gs_cube,gs_cube.F[:,4*self.gpc:])
+            scene_field = assign_feats(scene_field,scene_field.F[:,4*self.gpv:])
             
             '''
             It is noted that rgbs only exists where the context image is available, otherwise zeros are used.
             '''
-            cube_gaussians = self.dense_gaussian_adapter.forward(
+            gp_primitives = self.dense_gaussian_adapter.forward(
                 context["extrinsics"],
                 context["intrinsics"],
                 rearrange(coords_xyz, "n c l -> n l c"),
-                cube_opacities,
-                gs_cube,
+                scene_reliability,
+                scene_field,
                 input_images=rgbs if self.cfg.init_sh_input_img else None,
-                gpc = self.gpc,
+                gpv=self.gpv,
             )
             # Dump visualizations if needed.
             if visualization_dump is not None:
                 visualization_dump["depth"] = rearrange(
                     depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w
                 )
-                visualization_dump["cube_scales"] = cube_gaussians.scales
-                visualization_dump["cube_rotations"] = cube_gaussians.rotations
-            cube_gaussians = Gaussians(
-                cube_gaussians.means,
-                cube_gaussians.covariances,
-                cube_gaussians.harmonics,
-                cube_gaussians.opacities,
+                visualization_dump["cube_scales"] = gp_primitives.scales
+                visualization_dump["cube_rotations"] = gp_primitives.rotations
+            gp_primitives = Gaussians(
+                gp_primitives.means,
+                gp_primitives.covariances,
+                gp_primitives.harmonics,
+                gp_primitives.opacities,
             )
             if self.cfg.return_depth:
                 # return depth prediction for supervision
@@ -1129,12 +1153,12 @@ class EncoderCanonicalGS(Encoder[EncoderCanonicalGSCfg]):
                 ).squeeze(-1).squeeze(-1)
 
                 return {
-                "gaussians": cube_gaussians,
+                "gaussians": gp_primitives,
                 "depths": depths,
                 "nog_pb": nog_pb,
                 "nog_min": nog_min,
                 }
-            return cube_gaussians
+            return gp_primitives
         else:    
             # torch.save(out, 'notes/canonicalgs_feat.pth')
             gaussians = self.gaussian_head(out)  # [BV, C, H, W]

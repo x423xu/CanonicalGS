@@ -59,11 +59,15 @@ class EvaluationScriptTest(unittest.TestCase):
             override for override in overrides
             if override.startswith("checkpointing.pretrained_model=")
         )
-        self.assertTrue(checkpoint_override.endswith("checkpoints/gscube-depth22-gpc1-scale4-with-skip-small-woknn-maxconf-scratch-4w/checkpoints_backups/epoch_10-step_340070.ckpt"))
+        self.assertTrue(checkpoint_override.endswith("checkpoints/re10k.ckpt"))
         self.assertIn("mode=test", overrides)
         self.assertIn("test.compute_scores=true", overrides)
         self.assertIn("test.render_chunk_size=10", overrides)
-        self.assertIn("model.encoder.cube_merge_type=mean", overrides)
+        self.assertIn("model.encoder.evidence_fusion_type=mean", overrides)
+        self.assertIn("model.encoder.voxel_resolution_scale=2.8", overrides)
+        self.assertIn("model.encoder.gaussians_per_voxel=1", overrides)
+        self.assertIn("model.encoder.scene_field_encoder_size=small", overrides)
+        self.assertNotIn("model.encoder.cube_merge_type=mean", overrides)
 
 
     def test_num_scenes_materializes_capped_evaluation_index(self):
@@ -99,10 +103,37 @@ class EvaluationScriptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
             write_index(repo_root)
-            args = evaluation.parse_args(["--output-dir", "notes/eval", "--cell-scale", "2.8"])
+            args = evaluation.parse_args(["--output-dir", "notes/eval", "--voxel-resolution-scale", "2.8"])
             overrides = evaluation.build_overrides(args, repo_root)
 
         self.assertIn("output_dir=notes/eval_scale2.8", overrides)
+
+    def test_legacy_evaluation_flags_map_to_scene_field_names(self):
+        evaluation = load_evaluation_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            write_index(repo_root)
+            args = evaluation.parse_args([
+                "--cell-scale", "3.0",
+                "--cube-merge-type", "max_conf",
+                "--view-base", "5",
+                "--chunk-num", "3",
+                "--anchor-base", "6",
+                "--batch-forward",
+                "--anchor-features",
+                "--iter-depth",
+            ])
+            overrides = evaluation.build_overrides(args, repo_root)
+
+        self.assertIn("model.encoder.voxel_resolution_scale=3.0", overrides)
+        self.assertIn("model.encoder.evidence_fusion_type=max_conf", overrides)
+        self.assertEqual(args.depth_group_size, 5)
+        self.assertEqual(args.num_view_chunks, 3)
+        self.assertEqual(args.aggregation_group_size, 6)
+        self.assertTrue(args.chunked_view_forward)
+        self.assertTrue(args.use_grouped_scene_features)
+        self.assertTrue(args.grouped_depth_estimation)
 
 
 if __name__ == "__main__":

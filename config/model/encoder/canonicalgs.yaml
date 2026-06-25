@@ -56,9 +56,9 @@ gaussian_regressor_channels: 64
 train_depth_only: false
 
 
-gaussians_per_cell: 4
+gaussians_per_voxel: 4
 down_strides: [2, 2]
-cell_scale: 1.0
-cube_encoder_type: large
-cube_merge_type: max
+voxel_resolution_scale: 1.0
+scene_field_encoder_size: large
+evidence_fusion_type: max
 stem_norm: bn

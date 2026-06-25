@@ -15,10 +15,7 @@ from pathlib import Path
 
 
 DEFAULT_RE10K_INDEX = Path("assets/re10k_2v_canonical_len100_indicies.json")
-DEFAULT_RE10K_CHECKPOINT = Path(
-    "checkpoints/gscube-depth22-gpc1-scale4-with-skip-small-woknn-maxconf-scratch-4w/"
-    "checkpoints_backups/epoch_10-step_340070.ckpt"
-)
+DEFAULT_RE10K_CHECKPOINT = Path("checkpoints/re10k.ckpt")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -41,18 +38,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default="outputs/evaluation/re10k_2v")
     parser.add_argument("--num-scenes", type=int, default=100)
     parser.add_argument("--num-context-views", type=int, default=2)
-    parser.add_argument("--cell-scale", type=float, default=2.8)
-    parser.add_argument("--cube-merge-type", default="mean")
+    parser.add_argument("--voxel-resolution-scale", "--cell-scale", dest="voxel_resolution_scale", type=float, default=2.8)
+    parser.add_argument("--evidence-fusion-type", "--cube-merge-type", dest="evidence_fusion_type", default="mean")
     parser.add_argument("--render-chunk-size", type=int, default=10)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--cuda-device", default=os.environ.get("CANONICALGS_CUDA_DEVICE", "9"))
     parser.add_argument("--omp-num-threads", default=os.environ.get("OMP_NUM_THREADS", "32"))
-    parser.add_argument("--view-base", type=int, default=4)
-    parser.add_argument("--chunk-num", type=int, default=2)
-    parser.add_argument("--anchor-base", type=int, default=4)
-    parser.add_argument("--iter-depth", action="store_true")
-    parser.add_argument("--batch-forward", action="store_true")
-    parser.add_argument("--anchor-features", action="store_true")
+    parser.add_argument("--depth-group-size", "--view-base", dest="depth_group_size", type=int, default=4)
+    parser.add_argument("--num-view-chunks", "--chunk-num", dest="num_view_chunks", type=int, default=2)
+    parser.add_argument("--aggregation-group-size", "--anchor-base", dest="aggregation_group_size", type=int, default=4)
+    parser.add_argument("--grouped-depth-estimation", "--iter-depth", dest="grouped_depth_estimation", action="store_true")
+    parser.add_argument("--chunked-view-forward", "--batch-forward", dest="chunked_view_forward", action="store_true")
+    parser.add_argument("--use-grouped-scene-features", "--anchor-features", dest="use_grouped_scene_features", action="store_true")
     parser.add_argument("--save-image", action="store_true")
     parser.add_argument("--save-gt-image", action="store_true")
     parser.add_argument("--save-video", action="store_true")
@@ -94,8 +91,8 @@ def materialize_limited_index(index_path: Path, output_dir: Path, num_scenes: in
 def build_overrides(args: argparse.Namespace, repo_root: Path) -> list[str]:
     checkpoint = _repo_path(repo_root, args.checkpoint)
     output_dir = args.output_dir
-    if args.cell_scale is not None:
-        output_dir = f"{output_dir}_scale{args.cell_scale}"
+    if args.voxel_resolution_scale is not None:
+        output_dir = f"{output_dir}_scale{args.voxel_resolution_scale}"
     output_path = _repo_path(repo_root, output_dir)
     index_path = materialize_limited_index(
         _repo_path(repo_root, args.index_path),
@@ -131,11 +128,11 @@ def build_overrides(args: argparse.Namespace, repo_root: Path) -> list[str]:
         f"test.render_chunk_size={args.render_chunk_size}",
         "model.encoder.upsample_factor=4",
         "model.encoder.lowest_feature_resolution=4",
-        "model.encoder.gaussians_per_cell=1",
-        f"model.encoder.cell_scale={args.cell_scale}",
+        "model.encoder.gaussians_per_voxel=1",
+        f"model.encoder.voxel_resolution_scale={args.voxel_resolution_scale}",
         "model.encoder.down_strides=[3,2]",
-        "model.encoder.cube_encoder_type=small",
-        f"model.encoder.cube_merge_type={args.cube_merge_type}",
+        "model.encoder.scene_field_encoder_size=small",
+        f"model.encoder.evidence_fusion_type={args.evidence_fusion_type}",
     ]
     return overrides
 
@@ -181,6 +178,7 @@ def run_evaluation(args: argparse.Namespace, repo_root: Path) -> dict:
         from canonicalgs.loss import get_losses
         from canonicalgs.misc.step_tracker import StepTracker
         from canonicalgs.misc.wandb_tools import update_checkpoint_path
+        from scripts.rename_checkpoints import rename_state_dict_keys
         from canonicalgs.model.decoder import get_decoder
         from canonicalgs.model.encoder import get_encoder
         from canonicalgs.model.model_wrapper import ModelWrapper
@@ -241,12 +239,12 @@ def run_evaluation(args: argparse.Namespace, repo_root: Path) -> dict:
         step_tracker,
         eval_data_cfg=None,
         train_controller_cfg=cfg.train_controller,
-        iter_depth=args.iter_depth,
-        view_base=args.view_base,
-        batch_forward=args.batch_forward,
-        anchor_features=args.anchor_features,
-        chunk_num=args.chunk_num,
-        anchor_base=args.anchor_base,
+        grouped_depth_estimation=args.grouped_depth_estimation,
+        depth_group_size=args.depth_group_size,
+        chunked_view_forward=args.chunked_view_forward,
+        use_grouped_scene_features=args.use_grouped_scene_features,
+        num_view_chunks=args.num_view_chunks,
+        aggregation_group_size=args.aggregation_group_size,
     )
     data_module = DataModule(
         cfg.dataset,
@@ -261,6 +259,7 @@ def run_evaluation(args: argparse.Namespace, repo_root: Path) -> dict:
         pretrained_model = torch.load(cfg.checkpointing.pretrained_model, map_location="cpu")
         if "state_dict" in pretrained_model:
             pretrained_model = pretrained_model["state_dict"]
+        pretrained_model = rename_state_dict_keys(pretrained_model)
         model_wrapper.load_state_dict(pretrained_model, strict=strict_load)
         print(cyan(f"Loaded pretrained weights: {cfg.checkpointing.pretrained_model}"))
 

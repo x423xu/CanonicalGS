@@ -63,7 +63,14 @@ class OptimizerCfg:
     warm_up_steps: int
     lr_monodepth: float
     weight_decay: float
-    lr_gs_cube: float
+    lr_scene_field_encoder: float | None = None
+    lr_gs_cube: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.lr_scene_field_encoder is None:
+            self.lr_scene_field_encoder = self.lr_gs_cube
+        if self.lr_scene_field_encoder is None:
+            raise ValueError("Missing optimizer.lr_scene_field_encoder")
 
 
 @dataclass
@@ -140,22 +147,22 @@ class ModelWrapper(LightningModule):
         step_tracker: StepTracker | None,
         eval_data_cfg: Optional[DatasetCfg | None] = None,
         train_controller_cfg=None,
-        iter_depth: bool = False,
-        view_base: int = 2,
-        batch_forward: bool = False,
-        anchor_features: bool = False,
-        chunk_num: int = 1,
-        anchor_base: int = 4,
+        grouped_depth_estimation: bool = False,
+        depth_group_size: int = 2,
+        chunked_view_forward: bool = False,
+        use_grouped_scene_features: bool = False,
+        num_view_chunks: int = 1,
+        aggregation_group_size: int = 4,
         noise_ratio: float = 0.0,
     ) -> None:
         super().__init__()
         # self.automatic_optimization = False
-        self.iter_depth = iter_depth
-        self.view_base = view_base
-        self.batch_forward = batch_forward
-        self.chunk_num = chunk_num
-        self.anchor_features = anchor_features
-        self.anchor_base = anchor_base
+        self.grouped_depth_estimation = grouped_depth_estimation
+        self.depth_group_size = depth_group_size
+        self.chunked_view_forward = chunked_view_forward
+        self.num_view_chunks = num_view_chunks
+        self.use_grouped_scene_features = use_grouped_scene_features
+        self.aggregation_group_size = aggregation_group_size
         self.noise_ratio = noise_ratio
 
         self.optimizer_cfg = optimizer_cfg
@@ -176,12 +183,12 @@ class ModelWrapper(LightningModule):
         #     if "depth_predictor" in name:
         #         param.requires_grad = False
 
-        # CanonicalGS always runs the gs_cube path.
-        self.gs_cube = True
+        # CanonicalGS always runs the scene-field path.
+        self.use_scene_field = True
         self.vggt_meta = train_controller_cfg.vggt_meta if train_controller_cfg else False
         if not train_controller_cfg.base_model:
             for name, param in self.encoder.named_parameters():
-                if ("gs_cube_encoder"  not in name) and ("gaussian_merger" not in name) and ("gaussian_scorer" not in name):
+                if ("scene_field_encoder"  not in name) and ("gaussian_merger" not in name) and ("gaussian_scorer" not in name):
                     param.requires_grad = False
 
         # This is used for testing.
@@ -287,7 +294,7 @@ class ModelWrapper(LightningModule):
         )       
 
         if isinstance(gaussians, dict):
-            if self.gs_cube:
+            if self.use_scene_field:
                 nog_pb = gaussians["nog_pb"]
                 nog_min = gaussians["nog_min"]
                 for i in range(len(nog_pb)):
@@ -498,21 +505,21 @@ class ModelWrapper(LightningModule):
         return total_loss
     
     def _chunk(self, context):
-        chunk_num = self.chunk_num
+        num_view_chunks = self.num_view_chunks
         b, v, _, h, w = context["image"].shape
-        if chunk_num == 1:
+        if num_view_chunks == 1:
             return [context]
-        assert v % chunk_num == 0
-        chunk_size = v // chunk_num
+        assert v % num_view_chunks == 0
+        chunk_size = v // num_view_chunks
         contexts = []
-        for i in range(chunk_num):
+        for i in range(num_view_chunks):
             context_tmp={}
             for k in context.keys():
                 context_tmp[k] = context[k][:, i*chunk_size:(i+1)*chunk_size]
             contexts.append(context_tmp)
         return contexts
 
-    def _batch_forward(self, context, visualization_dump=None, scene=None):
+    def _chunked_view_forward(self, context, visualization_dump=None, scene=None):
         def _merge(gaussians_list):
             new_gaussians = {}
             for gaussians in gaussians_list:
@@ -537,7 +544,7 @@ class ModelWrapper(LightningModule):
                 else:
                     pass   
             return new_gaussians
-        if self.batch_forward and self.chunk_num>1:
+        if self.chunked_view_forward and self.num_view_chunks>1:
             contexts = self._chunk(context)
             gaussians_batch = []
             for c in contexts:
@@ -550,21 +557,21 @@ class ModelWrapper(LightningModule):
 
     def _online_test_forward(self, context, visualization_dump=None, scene=None):
         v = context["image"].shape[1]
-        if self.iter_depth:
-            gaussians = self._anchor_forward(context, visualization_dump=visualization_dump, view_base=self.view_base, scene=scene)
+        if self.grouped_depth_estimation:
+            gaussians = self._anchor_forward(context, visualization_dump=visualization_dump, depth_group_size=self.depth_group_size, scene=scene)
         else:
-            gaussians = self._anchor_forward(context, visualization_dump=visualization_dump, view_base = v, scene=scene)
+            gaussians = self._anchor_forward(context, visualization_dump=visualization_dump, depth_group_size = v, scene=scene)
         return gaussians
     
-    def _anchor_forward(self,  context, visualization_dump=None, view_base=2, scene=None):
+    def _anchor_forward(self,  context, visualization_dump=None, depth_group_size=2, scene=None):
         gaussians = self.encoder.anchor_forward(
             context,
             self.global_step,
             deterministic=False,
             visualization_dump=visualization_dump,
-            view_base=view_base,
-            anchor_features=self.anchor_features,
-            anchor_base=self.anchor_base,
+            depth_group_size=depth_group_size,
+            use_grouped_scene_features=self.use_grouped_scene_features,
+            aggregation_group_size=self.aggregation_group_size,
             noise_ratio=self.noise_ratio,
             scene=scene
         )
@@ -620,7 +627,7 @@ class ModelWrapper(LightningModule):
             os.makedirs('sem_seg/canonicalgs_input_features_{}v'.format(nv))
         with self.benchmarker.time("encoder"):
             # batch["context"]["extrinsics"] = batch["context"]["extrinsics"] + 0.01*torch.rand_like(batch["context"]["extrinsics"])
-            gaussians = self._batch_forward(batch['context'], visualization_dump=visualization_dump, scene=scene)
+            gaussians = self._chunked_view_forward(batch['context'], visualization_dump=visualization_dump, scene=scene)
             # gaussians = self.encoder(
             #     batch["context"],
             #     self.global_step,
@@ -645,7 +652,7 @@ class ModelWrapper(LightningModule):
                 # print(f'number of gaussians {gaussians.means.shape[1]}')
                 self.nog.append(gaussians.means.shape[1])
         # trim large scales for gscube
-        # if self.gs_cube:
+        # if self.use_scene_field:
         #     scales = visualization_dump["cube_scales"]
         #     max_scale = torch.max(scales[0], dim=-1)[0]  # [V]
         #     selected_ind = torch.where(max_scale < 1.5)[0]
@@ -675,7 +682,7 @@ class ModelWrapper(LightningModule):
             }
             torch.save(save_gaussians, feature_dir / f"{scene}_gaussians.pt")
         if self.test_cfg.save_gaussian: 
-            if self.gs_cube:
+            if self.use_scene_field:
                 scene = batch["scene"][0]
                 save_path = Path(get_cfg()['output_dir']) / 'gaussians_cube' / (scene + f'_{self.global_step}' + '.ply')
                 save_gaussian_cube_ply(gaussians, visualization_dump, batch, save_path)
@@ -1149,7 +1156,7 @@ class ModelWrapper(LightningModule):
                     self.render_video_interpolation_exaggerated(batch, vggt_meta=self.vggt_meta)
 
         if self.global_step % save_interval == 0 and self.global_rank == 0 and batch_idx==0:
-            if self.gs_cube:
+            if self.use_scene_field:
                 print(f"Saving Gaussian cube at step {self.global_step}...")
                 scene = batch["scene"][0]
                 save_path = Path(get_cfg()['output_dir']) / 'gaussians_cube' / (scene + f'_{self.global_step}' + '.ply')
@@ -1496,13 +1503,13 @@ class ModelWrapper(LightningModule):
         if self.optimizer_cfg.lr_monodepth > 0:
             pretrained_params = []
             new_params = []
-            gs_cube_params = []
+            scene_field_params = []
 
             for name, param in self.named_parameters():
                 if "pretrained" in name:
                     pretrained_params.append(param)
-                elif "gs_cube_encoder" in name:
-                    gs_cube_params.append(param)
+                elif "scene_field_encoder" in name:
+                    scene_field_params.append(param)
                 else:
                     new_params.append(param)
 
@@ -1513,14 +1520,14 @@ class ModelWrapper(LightningModule):
                         "lr": self.optimizer_cfg.lr_monodepth,
                     },
                     {"params": new_params, "lr": self.optimizer_cfg.lr},
-                    {"params": gs_cube_params, "lr": self.optimizer_cfg.lr_gs_cube},
+                    {"params": scene_field_params, "lr": self.optimizer_cfg.lr_scene_field_encoder},
                 ],
                 weight_decay=self.optimizer_cfg.weight_decay,
             )
 
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optimizer,
-                [self.optimizer_cfg.lr_monodepth, self.optimizer_cfg.lr, self.optimizer_cfg.lr_gs_cube],
+                [self.optimizer_cfg.lr_monodepth, self.optimizer_cfg.lr, self.optimizer_cfg.lr_scene_field_encoder],
                 self.trainer.max_steps + 10,
                 pct_start=0.01,
                 cycle_momentum=False,

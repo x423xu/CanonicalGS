@@ -433,12 +433,14 @@ class DenseGaussianAdapter(nn.Module):
         intrinsics: Float[Tensor, "*#batch 3 3"] | None,
         coordinates,
         opacities,
-        gs_cube,
+        scene_field,
         eps: float = 1e-8,
         input_images: Tensor | None = None,
-        gpc = 1
+        gpv: int | None = None,
+        gpc: int | None = None,
     ) -> Gaussians:
-        
+        if gpv is None:
+            gpv = 1 if gpc is None else gpc
         assert input_images is not None
 
         # coordinates  =coordinates + 0.1* torch.randn_like(coordinates)  # add noise to coordinates
@@ -449,7 +451,7 @@ class DenseGaussianAdapter(nn.Module):
         batch_coords = []
         max_len = 0
         b,v,_,_ = extrinsics.shape
-        coords = gs_cube.C
+        coords = scene_field.C
 
         for i in range(b):
             selected_ind = torch.where(coords[:, 0] == i)[0]
@@ -458,7 +460,7 @@ class DenseGaussianAdapter(nn.Module):
         
         for i in range(b):
             selected_ind = torch.where(coords[:, 0] == i)[0]
-            feats_i = gs_cube.F[selected_ind]
+            feats_i = scene_field.F[selected_ind]
             opacities_i = opacities[selected_ind]
             imgs_i = input_images[selected_ind]
             coords_i = coordinates[selected_ind]
@@ -482,12 +484,12 @@ class DenseGaussianAdapter(nn.Module):
                 batch_opacities.append(opacities_i)
                 batch_feats.append(feats_i)
         batch_coords = torch.stack(batch_coords, dim=0)  # [B, N, 3]
-        batch_feats = torch.stack(batch_feats, dim=0)  # [B, N, C*gpc]
-        batch_feats = rearrange(batch_feats, "b n (c gpc) -> b n c gpc", gpc=gpc)  # [B, N, C, gpc]
+        batch_feats = torch.stack(batch_feats, dim=0)  # [B, N, C*gpv]
+        batch_feats = rearrange(batch_feats, "b n (c gpv) -> b n c gpv", gpv=gpv)  # [B, N, C, gpv]
         batch_imgs = torch.stack(batch_imgs, dim=0)
         batch_opacities = torch.stack(batch_opacities, dim=0) 
-        batch_opacities = rearrange(batch_opacities, "b n l gpc -> b n gpc l ()")
-        batch_feats = rearrange(batch_feats, "b n c gpc -> b n gpc c") 
+        batch_opacities = rearrange(batch_opacities, "b n l gpv -> b n gpv l ()")
+        batch_feats = rearrange(batch_feats, "b n c gpv -> b n gpv c") 
         scales, rotations, sh = batch_feats.split((3, 4, 3 * self.d_sh), dim=-1)
 
         scales = torch.clamp(F.softplus(scales-4.0),
@@ -501,11 +503,11 @@ class DenseGaussianAdapter(nn.Module):
         rotations = rotations / (rotations.norm(dim=-1, keepdim=True) + eps)
 
         # 
-        sh = rearrange(sh, "b r gpc (xyz d_sh)  -> b r gpc () () xyz d_sh", xyz=3)
+        sh = rearrange(sh, "b r gpv (xyz d_sh)  -> b r gpv () () xyz d_sh", xyz=3)
         sh = sh.broadcast_to((*batch_opacities.shape, 3, self.d_sh)) * self.sh_mask
         # [B, V, H*W, 1, 1, 3]
         imgs = rearrange(batch_imgs, "b r c -> b r () () c")
-        imgs = repeat(imgs, "b r m n c -> b r gpc m n c", gpc=gpc)
+        imgs = repeat(imgs, "b r m n c -> b r gpv m n c", gpv=gpv)
         # init sh with input images
         sh[..., 0] = sh[..., 0] + RGB2SH(imgs)
 
@@ -526,14 +528,14 @@ class DenseGaussianAdapter(nn.Module):
         #     rotations=rearrange(rotations.broadcast_to((*scales.shape[:-1], 4)), "b r n -> b () r () () n"),
         # )
         return Gaussians(
-            means=rearrange(batch_coords, "b r gpc xyz -> b (r gpc) xyz"),
-            covariances=rearrange(covariances, "b r gpc m n -> b (r gpc) m n"),
-            harmonics=rearrange(sh, "b r gpc l m n k -> b (r gpc) (l m n) k", l=1, m=1),
-            opacities=rearrange(batch_opacities, "b r gpc m n -> b (r gpc m n)",m=1,n=1),
+            means=rearrange(batch_coords, "b r gpv xyz -> b (r gpv) xyz"),
+            covariances=rearrange(covariances, "b r gpv m n -> b (r gpv) m n"),
+            harmonics=rearrange(sh, "b r gpv l m n k -> b (r gpv) (l m n) k", l=1, m=1),
+            opacities=rearrange(batch_opacities, "b r gpv m n -> b (r gpv m n)",m=1,n=1),
             # NOTE: These aren't yet rotated into world space, but they're only used for
             # exporting Gaussians to ply files. This needs to be fixed...
-            scales=rearrange(scales, "b r gpc n -> b (r gpc) n"),
-            rotations=rearrange(rotations.broadcast_to((*scales.shape[:-1], 4)), "b r gpc n -> b (r gpc) n"),
+            scales=rearrange(scales, "b r gpv n -> b (r gpv) n"),
+            rotations=rearrange(rotations.broadcast_to((*scales.shape[:-1], 4)), "b r gpv n -> b (r gpv) n"),
         )
 
     def get_scale_multiplier(
