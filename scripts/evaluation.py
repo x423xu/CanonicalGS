@@ -183,7 +183,6 @@ def run_evaluation(args: argparse.Namespace, repo_root: Path) -> dict:
         from canonicalgs.loss import get_losses
         from canonicalgs.misc.step_tracker import StepTracker
         from canonicalgs.misc.wandb_tools import update_checkpoint_path
-        from scripts.rename_checkpoints import rename_state_dict_keys
         from canonicalgs.model.decoder import get_decoder
         from canonicalgs.model.encoder import get_encoder
         from canonicalgs.model.model_wrapper import ModelWrapper
@@ -264,7 +263,6 @@ def run_evaluation(args: argparse.Namespace, repo_root: Path) -> dict:
         pretrained_model = torch.load(cfg.checkpointing.pretrained_model, map_location="cpu")
         if "state_dict" in pretrained_model:
             pretrained_model = pretrained_model["state_dict"]
-        pretrained_model = rename_state_dict_keys(pretrained_model)
         model_wrapper.load_state_dict(pretrained_model, strict=strict_load)
         print(cyan(f"Loaded pretrained weights: {cfg.checkpointing.pretrained_model}"))
 

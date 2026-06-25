@@ -153,6 +153,14 @@ class EvaluationScriptTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             evaluation.parse_args(["--output-latent-scene", "--num-scenes", "2"])
 
+    def test_evaluation_does_not_rename_checkpoints(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        evaluation_source = (repo_root / "scripts" / "evaluation.py").read_text()
+
+        self.assertNotIn("rename_checkpoints", evaluation_source)
+        self.assertNotIn("rename_state_dict", evaluation_source)
+        self.assertFalse((repo_root / "scripts" / "rename_checkpoints.py").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
