@@ -96,7 +96,7 @@ hf download "$CANONICALGS_HF_REPO" re10k.ckpt --local-dir checkpoints
 hf download "$CANONICALGS_HF_REPO" dl3dv.ckpt --local-dir checkpoints
 ```
 
-The checkpoint files are ignored by git and should stay outside version control.
+The released files are compact inference checkpoints: they include model weights but not optimizer or scheduler state. Checkpoint files are ignored by git and should stay outside version control.
 
 ## Inference and Evaluation
 
