@@ -78,30 +78,29 @@ A common setup is:
 ln -s /path/to/your/datasets datasets
 ```
 
-The compact evaluation indices shipped with this repo are:
+The evaluation indices with this repo are:
 
 ```text
 assets/re10k_2v.json   assets/re10k_4v.json   assets/re10k_6v.json   assets/re10k_8v.json
 assets/dl3dv_2v.json   assets/dl3dv_4v.json   assets/dl3dv_6v.json   assets/dl3dv_8v.json
 ```
 
-The released checkpoints are hosted on Hugging Face, not in git. Download them into `checkpoints/` before evaluation:
+The released checkpoints are hosted on Hugging Face at [`xxy/CanonicalGS`](https://huggingface.co/xxy/CanonicalGS). Download them into `checkpoints/` before evaluation:
 
 ```bash
 pip install -U huggingface_hub
 mkdir -p checkpoints
 
-# Replace this with the final Hugging Face repo id after release.
-export CANONICALGS_HF_REPO=<huggingface-user-or-org>/CanonicalGS
-huggingface-cli download "$CANONICALGS_HF_REPO" re10k.ckpt --local-dir checkpoints --local-dir-use-symlinks False
-huggingface-cli download "$CANONICALGS_HF_REPO" dl3dv.ckpt --local-dir checkpoints --local-dir-use-symlinks False
+export CANONICALGS_HF_REPO=xxy/CanonicalGS
+hf download "$CANONICALGS_HF_REPO" re10k.ckpt --local-dir checkpoints
+hf download "$CANONICALGS_HF_REPO" dl3dv.ckpt --local-dir checkpoints
 ```
 
-CanonicalGS does not require Git LFS. Checkpoints are ignored by git so accidental large-file commits stay out of the repository.
+The checkpoint files are ignored by git and should stay outside version control.
 
 ## Inference and Evaluation
 
-The commands below mirror the historical GS-Cube evaluation scripts, but use only CanonicalGS paths under `assets/` and the renamed CanonicalGS checkpoints. They evaluate the first 100 scenes by default for practical reproduction; change `--num-scenes` to run a different subset.
+The commands below use CanonicalGS paths under `assets/` and the corresponding checkpoints. They evaluate the first 100 scenes by default for practical reproduction; omit `--num-scenes` to run a full evaluation.
 
 ```bash
 export CANONICALGS_RE10K_ROOT=/path/to/datasets/re10k
@@ -297,7 +296,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m canonicalgs.main +experiment=dl3dv \
   output_dir=outputs/train/dl3dv \
   wandb.mode=disabled \
   train.eval_model_every_n_val=0 \
-  trainer.max_steps=300001
+  trainer.max_steps=100001
 ```
 
 Important config names for reimplementation:
