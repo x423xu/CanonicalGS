@@ -23,7 +23,7 @@
 </p>
 
 <p>
-CanonicalGS learns stable internal representations with increased input views. Such capability positions the feed-forward Gaussian splatting as not only a novel view renderer but also a canonical scene representation learner.
+CanonicalGS learns stable internal representations with increased input views. Such capability positions the feed-forward Gaussian splatting as not only an improved novel view renderer but also a canonical scene representation learner.
 </p>
 
 
